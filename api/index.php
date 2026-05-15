@@ -31,4 +31,22 @@ foreach ($serverlessDefaults as $key => $value) {
     $_SERVER[$key] = $value;
 }
 
-require __DIR__.'/../public/index.php';
+try {
+    require __DIR__.'/../public/index.php';
+} catch (Throwable $error) {
+    error_log($error);
+
+    http_response_code(500);
+    header('Content-Type: application/json');
+
+    $debug = filter_var(getenv('APP_DEBUG') ?: 'false', FILTER_VALIDATE_BOOL);
+    echo json_encode($debug
+        ? [
+            'error' => $error->getMessage(),
+            'type' => $error::class,
+            'file' => $error->getFile(),
+            'line' => $error->getLine(),
+        ]
+        : ['error' => 'Internal Server Error']
+    );
+}
