@@ -43,8 +43,7 @@ class AppServiceProvider extends ServiceProvider
             return;
         }
 
-        $endpointId = preg_replace('/-pooler$/', '', $firstLabel);
-        $options = "endpoint={$endpointId}";
+        $options = "endpoint={$firstLabel}";
 
         putenv("PGOPTIONS={$options}");
         $_ENV['PGOPTIONS'] = $options;

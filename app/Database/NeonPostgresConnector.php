@@ -35,6 +35,6 @@ class NeonPostgresConnector extends PostgresConnector
             return null;
         }
 
-        return preg_replace('/-pooler$/', '', $firstLabel);
+        return $firstLabel;
     }
 }
