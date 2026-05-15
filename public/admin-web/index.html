@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nexora Admin</title>
+    <link rel="stylesheet" href="/admin-web/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>NEXORA</h1>
+        <p>Painel administrativo em tempo quase real</p>
+      </div>
+      <div class="status">
+        <span id="connection-dot"></span>
+        <span id="connection-text">desconectado</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="auth-grid">
+        <div class="panel">
+          <h2>Acesso</h2>
+          <label>API</label>
+          <input id="api-url" />
+          <label>Token admin</label>
+          <input id="admin-token" type="password" placeholder="admin-test" />
+          <button id="save-token">Usar token</button>
+        </div>
+
+        <div class="panel">
+          <h2>Login admin</h2>
+          <label>CPF ou email</label>
+          <input id="login-id" placeholder="admin@nexora.local" />
+          <label>Senha</label>
+          <input id="login-password" type="password" />
+          <button id="login-button">Entrar</button>
+        </div>
+      </section>
+
+      <section id="message" class="message hidden"></section>
+
+      <section class="toolbar">
+        <button id="refresh-button">Atualizar agora</button>
+        <label class="inline">
+          <input id="auto-refresh" type="checkbox" checked />
+          auto-refresh 5s
+        </label>
+      </section>
+
+      <section id="overview" class="cards"></section>
+
+      <section class="panel">
+        <h2>Usuarios</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Public ID</th>
+                <th>Email</th>
+                <th>Status</th>
+                <th>Role</th>
+                <th>XP</th>
+                <th>Nivel</th>
+                <th>Buff</th>
+                <th>Taxa</th>
+                <th>Acoes</th>
+              </tr>
+            </thead>
+            <tbody id="users-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Solicitacoes</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Codigo</th>
+                <th>Usuario</th>
+                <th>Valor</th>
+                <th>Recebido</th>
+                <th>Status</th>
+                <th>Taxa</th>
+                <th>Acoes</th>
+              </tr>
+            </thead>
+            <tbody id="requests-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Apoios Pix</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Solicitacao</th>
+                <th>Doador</th>
+                <th>Valor</th>
+                <th>Status</th>
+                <th>Fotos</th>
+                <th>Acoes</th>
+              </tr>
+            </thead>
+            <tbody id="contributions-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Auditoria</h2>
+        <div id="audit-list" class="audit-list"></div>
+      </section>
+    </main>
+
+    <script src="/admin-web/app.js"></script>
+  </body>
+</html>

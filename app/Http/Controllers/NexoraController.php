@@ -1,0 +1,1207 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Exceptions\ApiException;
+use App\Services\CpfValidator;
+use App\Services\PixCopyCode;
+use App\Services\ReputationRules;
+use App\Services\RoadmapRules;
+use App\Services\SecurityService;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Str;
+
+class NexoraController extends Controller
+{
+    public function __construct(private readonly SecurityService $security)
+    {
+        try {
+            $this->ensureBootstrapSuperAdmin();
+        } catch (\Throwable) {
+            // Migrations may not have run yet.
+        }
+    }
+
+    public function health(): JsonResponse
+    {
+        return $this->ok('nexora-backend-laravel');
+    }
+
+    public function register(Request $request): JsonResponse
+    {
+        $email = $this->security->normalizeEmail((string) $request->input('email', ''));
+        $name = trim((string) $request->input('name', ''));
+        $cpf = CpfValidator::digits((string) $request->input('cpf', ''));
+        $pixKey = trim((string) $request->input('pixKey', ''));
+        $password = (string) $request->input('password', '');
+
+        if (strlen($name) < 2 || strlen($name) > 80) {
+            throw new ApiException(400, 'Informe um nome valido.');
+        }
+        if (! $this->security->isValidEmail($email)) {
+            throw new ApiException(400, 'Informe um e-mail valido.');
+        }
+        if (! CpfValidator::isValid($cpf)) {
+            throw new ApiException(400, 'CPF invalido.');
+        }
+        if (! $this->security->isValidPixKey($pixKey)) {
+            throw new ApiException(400, 'Informe uma chave Pix valida.');
+        }
+        if (strlen($password) < 8) {
+            throw new ApiException(400, 'A senha precisa ter pelo menos 8 caracteres.');
+        }
+
+        $roadmap = RoadmapRules::currentStep($this->levelCounts());
+        if (DB::table('users')->where('status', 'APPROVED')->count() >= $roadmap['capacity']) {
+            throw new ApiException(409, 'A comunidade esta no limite atual de participantes.');
+        }
+        if ($this->userByEmail($email) !== null) {
+            throw new ApiException(409, 'E-mail ja cadastrado.');
+        }
+        if (DB::table('users')->where('cpf_hash', $this->security->hashCpf($cpf))->exists()) {
+            throw new ApiException(409, 'CPF ja cadastrado.');
+        }
+
+        $inviter = null;
+        $inviteCode = trim((string) $request->input('inviteCode', ''));
+        if ($inviteCode !== '') {
+            $inviter = DB::table('users')->where('invite_code', strtoupper($inviteCode))->first();
+            if ($inviter === null) {
+                throw new ApiException(400, 'Codigo de convite invalido.');
+            }
+        }
+
+        if ($email === config('nexora.super_admin_email') && $cpf !== config('nexora.super_admin_cpf')) {
+            throw new ApiException(403, 'Dados do fundador nao conferem.');
+        }
+
+        $role = match (true) {
+            $email === config('nexora.super_admin_email') && $cpf === config('nexora.super_admin_cpf') => 'SUPER_ADMIN',
+            in_array($email, config('nexora.founder_emails', []), true) => 'ADMIN',
+            default => 'USER',
+        };
+        $status = in_array($role, ['ADMIN', 'SUPER_ADMIN'], true) ? 'APPROVED' : 'PENDING_REVIEW';
+        $code = $this->security->newVerificationCode();
+        $now = $this->nowMs();
+        $id = (string) Str::uuid();
+
+        DB::table('users')->insert([
+            'id' => $id,
+            'public_id' => $this->uniquePublicId(),
+            'name' => $name,
+            'email' => $email,
+            'email_verified' => false,
+            'verification_code_hash' => $this->security->hashVerificationCode($email, $code),
+            'verification_expires_at' => $now + 30 * 60 * 1000,
+            'cpf_hash' => $this->security->hashCpf($cpf),
+            'cpf_cipher' => $this->security->encrypt($cpf),
+            'pix_cipher' => $this->security->encrypt($pixKey),
+            'password_hash' => $this->security->hashPassword($password),
+            'status' => $status,
+            'role' => $role,
+            'xp' => 0,
+            'level' => 1,
+            'buff_bps' => 0,
+            'on_time_returned_cents' => 0,
+            'early_returned_cents' => 0,
+            'invited_by' => $inviter?->id,
+            'invite_code' => $this->uniqueInviteCode(),
+            'created_at_ms' => $now,
+            'admin_fee_due_cents' => 0,
+        ]);
+        $this->audit(null, 'USER_REGISTERED', $id);
+        $this->sendVerificationCode($email, $name, $code);
+
+        return response()->json([
+            'message' => 'Cadastro criado. Verifique o e-mail para continuar.',
+            'devVerificationCode' => $this->mailConfigured() || $this->isProduction() ? null : $code,
+        ], 201);
+    }
+
+    public function resendVerification(Request $request): JsonResponse
+    {
+        $email = $this->security->normalizeEmail((string) $request->input('email', ''));
+        $user = $this->userByEmail($email);
+        if ($user !== null && ! (bool) $user->email_verified) {
+            $code = $this->security->newVerificationCode();
+            DB::table('users')->where('email', $email)->where('email_verified', false)->update([
+                'verification_code_hash' => $this->security->hashVerificationCode($email, $code),
+                'verification_expires_at' => $this->nowMs() + 30 * 60 * 1000,
+            ]);
+            $this->sendVerificationCode($email, $user->name, $code);
+        }
+        return $this->ok('Se o cadastro existir, um novo codigo sera enviado.');
+    }
+
+    public function recoverPassword(Request $request): JsonResponse
+    {
+        $email = $this->security->normalizeEmail((string) $request->input('email', ''));
+        $user = $this->userByEmail($email);
+        if ($user !== null) {
+            $code = $this->security->newVerificationCode();
+            DB::table('users')->where('email', $email)->update([
+                'password_reset_code_hash' => $this->security->hashRecoveryCode($email, $code),
+                'password_reset_expires_at' => $this->nowMs() + 30 * 60 * 1000,
+            ]);
+            $this->sendRecoveryCode($email, $code);
+        }
+        return $this->ok('Se o e-mail existir, enviaremos instrucoes de recuperacao.');
+    }
+
+    public function resetPassword(Request $request): JsonResponse
+    {
+        $email = $this->security->normalizeEmail((string) $request->input('email', ''));
+        $newPassword = (string) $request->input('newPassword', '');
+        if (strlen($newPassword) < 8) {
+            throw new ApiException(400, 'A nova senha precisa ter pelo menos 8 caracteres.');
+        }
+        $updated = DB::table('users')
+            ->where('email', $email)
+            ->where('password_reset_code_hash', $this->security->hashRecoveryCode($email, trim((string) $request->input('code', ''))))
+            ->where('password_reset_expires_at', '>=', $this->nowMs())
+            ->update([
+                'password_hash' => $this->security->hashPassword($newPassword),
+                'password_reset_code_hash' => null,
+                'password_reset_expires_at' => null,
+            ]);
+        if ($updated !== 1) {
+            throw new ApiException(400, 'Codigo invalido ou expirado.');
+        }
+        $this->audit(null, 'PASSWORD_RESET', 'email:'.crc32($email));
+        return $this->ok('Senha atualizada.');
+    }
+
+    public function verifyEmail(Request $request): JsonResponse
+    {
+        $email = $this->security->normalizeEmail((string) $request->input('email', ''));
+        $updated = DB::table('users')
+            ->where('email', $email)
+            ->where('verification_code_hash', $this->security->hashVerificationCode($email, trim((string) $request->input('code', ''))))
+            ->where('verification_expires_at', '>=', $this->nowMs())
+            ->update([
+                'email_verified' => true,
+                'verification_code_hash' => null,
+                'verification_expires_at' => null,
+            ]);
+        if ($updated !== 1) {
+            throw new ApiException(400, 'Codigo invalido ou expirado.');
+        }
+        return $this->ok('E-mail verificado. Aguarde a validacao manual se necessario.');
+    }
+
+    public function login(Request $request): JsonResponse
+    {
+        $identifier = trim((string) $request->input('identifier', ''));
+        $user = str_contains($identifier, '@')
+            ? $this->userByEmail($this->security->normalizeEmail($identifier))
+            : (strlen(CpfValidator::digits($identifier)) === 11
+                ? DB::table('users')->where('cpf_hash', $this->security->hashCpf(CpfValidator::digits($identifier)))->first()
+                : null);
+
+        if ($user === null || ! $this->security->verifyPassword((string) $request->input('password', ''), $user->password_hash)) {
+            throw new ApiException(401, 'CPF/e-mail ou senha incorretos.');
+        }
+        if (! (bool) $user->email_verified) {
+            throw new ApiException(403, 'Verifique seu e-mail antes de entrar.');
+        }
+        if ($user->status === 'BLOCKED') {
+            throw new ApiException(403, 'Conta bloqueada para novas acoes.');
+        }
+
+        $token = $this->security->newToken();
+        DB::table('auth_tokens')->insert([
+            'token_hash' => $this->security->hashToken($token),
+            'user_id' => $user->id,
+            'expires_at' => $this->nowMs() + 7 * 24 * 60 * 60 * 1000,
+            'created_at_ms' => $this->nowMs(),
+        ]);
+
+        return response()->json(['token' => $token, 'profile' => $this->profileResponse($user)]);
+    }
+
+    public function me(Request $request): JsonResponse
+    {
+        return response()->json($this->profileResponse($this->requireUser($request)));
+    }
+
+    public function dashboard(Request $request): JsonResponse
+    {
+        $user = $this->requireUser($request);
+        $stats = $this->dashboardStats();
+        $roadmap = RoadmapRules::currentStep($this->levelCounts());
+        return response()->json([
+            'communityLiquidityCents' => $stats['liquidityCents'],
+            'inCirculationCents' => $stats['inCirculationCents'],
+            'completionPercent' => $stats['completionPercent'],
+            'activeRequests' => $stats['activeRequests'],
+            'completedOperations' => $stats['completedOperations'],
+            'activeUsers' => $stats['activeUsers'],
+            'userLimitCents' => ReputationRules::supportLimitCents((int) $user->level),
+            'roadmapStep' => $roadmap['step'],
+            'roadmapCapacity' => $roadmap['capacity'],
+        ]);
+    }
+
+    public function community(Request $request): JsonResponse
+    {
+        $currentUser = $this->requireUser($request);
+        $rows = DB::table('support_requests')
+            ->whereIn('status', ['OPEN', 'FUNDED'])
+            ->where('requester_id', '<>', $currentUser->id)
+            ->orderByRaw('COALESCE(approved_at, created_at_ms) ASC')
+            ->orderBy('created_at_ms')
+            ->get();
+
+        return response()->json($rows->map(fn ($support) => $this->supportResponse($support, $this->userById($support->requester_id), false))->values());
+    }
+
+    public function myRequests(Request $request): JsonResponse
+    {
+        $user = $this->requireUser($request);
+        return response()->json(DB::table('support_requests')
+            ->where('requester_id', $user->id)
+            ->orderBy('created_at_ms')
+            ->get()
+            ->map(fn ($support) => $this->supportResponse($support, $user, true))
+            ->values());
+    }
+
+    public function myContributions(Request $request): JsonResponse
+    {
+        $user = $this->requireUser($request);
+        return response()->json($this->contributionHistoryQuery()
+            ->where(function ($query) use ($user) {
+                $query->where('contributions.donor_id', $user->id)
+                    ->orWhere('support_requests.requester_id', $user->id);
+            })
+            ->orderBy('contributions.created_at_ms')
+            ->orderBy('contributions.id')
+            ->get()
+            ->map(fn ($row) => $this->historyResponse($row, $user->id))
+            ->values());
+    }
+
+    public function createSupportRequest(Request $request): JsonResponse
+    {
+        $user = $this->requireUser($request);
+        if ($user->status !== 'APPROVED') {
+            throw new ApiException(403, 'Conta aguardando validacao manual.');
+        }
+        if (! ReputationRules::canRequestHelp($user)) {
+            throw new ApiException(403, 'Para solicitar ajuda, e necessario estar no Nivel 2, com pelo menos 100 XP.');
+        }
+        $amountCents = (int) $request->input('amountCents', 0);
+        $dueDays = (int) $request->input('dueDays', 0);
+        if ($amountCents <= 0) {
+            throw new ApiException(400, 'Informe um valor valido.');
+        }
+        if ($dueDays < 1 || $dueDays > 90) {
+            throw new ApiException(400, 'Prazo precisa ficar entre 1 e 90 dias.');
+        }
+        if ($amountCents > ReputationRules::supportLimitCents((int) $user->level)) {
+            throw new ApiException(400, 'Valor acima do seu limite atual.');
+        }
+        $nextFee = ReputationRules::adminFeeFor($amountCents);
+        $feeLimit = ReputationRules::adminFeeLimitCents((int) $user->level);
+        if ((int) $user->admin_fee_due_cents >= $feeLimit || (int) $user->admin_fee_due_cents + $nextFee > $feeLimit) {
+            throw new ApiException(409, 'Taxa administrativa pendente atingiu o limite do seu nivel.');
+        }
+
+        $id = (string) Str::uuid();
+        $support = [
+            'id' => $id,
+            'requester_id' => $user->id,
+            'public_code' => $this->uniqueSupportCode(),
+            'amount_cents' => $amountCents,
+            'funded_cents' => 0,
+            'due_days' => $dueDays,
+            'due_at' => null,
+            'description' => Str::limit(trim((string) $request->input('description', '')), 500, ''),
+            'status' => 'PENDING_ADMIN',
+            'created_at_ms' => $this->nowMs(),
+            'approved_at' => null,
+            'returned_at' => null,
+            'rejected_reason' => null,
+        ];
+        if ($support['description'] === '') {
+            $support['description'] = null;
+        }
+        DB::table('support_requests')->insert($support);
+        $this->audit($user->id, 'SUPPORT_REQUEST_CREATED', $id);
+
+        return response()->json($this->supportResponse((object) $support, $user, true), 201);
+    }
+
+    public function createContribution(Request $request, string $id): JsonResponse
+    {
+        $donor = $this->requireUser($request);
+        if ($donor->status !== 'APPROVED') {
+            throw new ApiException(403, 'Conta aguardando validacao manual.');
+        }
+        $support = $this->supportById($id);
+        if ($support === null) {
+            throw new ApiException(404, 'Solicitacao nao encontrada.');
+        }
+        if ($support->status !== 'OPEN') {
+            throw new ApiException(409, 'Solicitacao nao esta aberta para novos apoios.');
+        }
+        if ($support->requester_id === $donor->id) {
+            throw new ApiException(400, 'Nao e possivel apoiar a propria solicitacao.');
+        }
+        $amountCents = (int) $request->input('amountCents', 0);
+        if ($amountCents <= 0 || $amountCents > $this->availableContributionCents($support)) {
+            throw new ApiException(400, 'Valor de apoio invalido.');
+        }
+
+        $contribution = DB::transaction(fn () => $this->insertContribution($support->id, $donor->id, $amountCents));
+        $this->audit($donor->id, 'CONTRIBUTION_CREATED', $contribution->id);
+
+        return response()->json($this->instructionResponse($contribution, $support), 201);
+    }
+
+    public function createContributionBatch(Request $request): JsonResponse
+    {
+        $donor = $this->requireUser($request);
+        if ($donor->status !== 'APPROVED') {
+            throw new ApiException(403, 'Conta aguardando validacao manual.');
+        }
+        $total = (int) $request->input('amountCents', 0);
+        if ($total <= 0) {
+            throw new ApiException(400, 'Informe um valor valido.');
+        }
+
+        $created = DB::transaction(function () use ($donor, $total) {
+            $remaining = $total;
+            $created = [];
+            $supports = DB::table('support_requests')
+                ->where('status', 'OPEN')
+                ->where('requester_id', '<>', $donor->id)
+                ->orderByRaw('COALESCE(approved_at, created_at_ms) ASC')
+                ->orderBy('created_at_ms')
+                ->lockForUpdate()
+                ->get();
+            foreach ($supports as $support) {
+                if ($remaining <= 0) {
+                    break;
+                }
+                $available = $this->availableContributionCents($support);
+                if ($available <= 0) {
+                    continue;
+                }
+                $amount = min($remaining, $available);
+                $contribution = $this->insertContribution($support->id, $donor->id, $amount);
+                $this->audit($donor->id, 'CONTRIBUTION_CREATED', $contribution->id);
+                $created[] = [$contribution, $support];
+                $remaining -= $amount;
+            }
+            return $created;
+        });
+
+        if ($created === []) {
+            throw new ApiException(409, 'Nao ha solicitacoes abertas de outras pessoas para distribuir esse valor. A sua propria solicitacao nao pode receber seu proprio Pix.');
+        }
+        $instructions = array_map(fn ($item) => $this->instructionResponse($item[0], $item[1]), $created);
+        $allocated = array_sum(array_column($instructions, 'amountCents'));
+        return response()->json([
+            'requestedAmountCents' => $total,
+            'allocatedAmountCents' => $allocated,
+            'unallocatedAmountCents' => max($total - $allocated, 0),
+            'instructions' => $instructions,
+            'message' => 'Pix fracionado por ordem cronologica. Use o codigo Pix da plataforma e envie os comprovantes depois da transferencia.',
+        ], 201);
+    }
+
+    public function submitReceipt(Request $request, string $id): JsonResponse
+    {
+        $user = $this->requireUser($request);
+        $contribution = $this->contributionById($id);
+        if ($contribution === null) {
+            throw new ApiException(404, 'Apoio nao encontrado.');
+        }
+        $support = $this->supportById($contribution->request_id);
+        $side = strtoupper(trim((string) $request->input('side', 'SENDER')));
+        if (! in_array($side, ['SENDER', 'RECEIVER'], true)) {
+            throw new ApiException(400, 'Tipo de comprovante invalido.');
+        }
+        if ($side === 'SENDER' && $contribution->donor_id !== $user->id) {
+            throw new ApiException(409, 'Apenas quem enviou o Pix pode anexar a foto de envio.');
+        }
+        if ($side === 'RECEIVER' && $support->requester_id !== $user->id) {
+            throw new ApiException(409, 'Apenas quem recebeu o Pix pode anexar a foto de recebimento.');
+        }
+        if ((int) $contribution->amount_cents !== (int) $request->input('amountCents', 0)) {
+            throw new ApiException(409, 'Valor do comprovante nao confere.');
+        }
+        $hash = strtolower(trim((string) $request->input('receiptHash', '')));
+        if (! $this->security->isValidSha256($hash)) {
+            throw new ApiException(400, 'Hash do comprovante invalido.');
+        }
+        $imageBase64 = $this->validateReceiptImage((string) $request->input('receiptImageBase64', ''), (string) $request->input('receiptMimeType', 'image/jpeg'), $hash);
+        $transactionId = $this->normalizeTransactionId((string) $request->input('transactionId', ''));
+        if (strlen($transactionId) < 6 || strlen($transactionId) > 80) {
+            throw new ApiException(400, 'ID da transacao invalido.');
+        }
+        if ($contribution->transaction_id !== null && $contribution->transaction_id !== $transactionId) {
+            throw new ApiException(409, 'Este apoio ja possui outro ID de transacao.');
+        }
+        $duplicated = DB::table('contributions')->where('transaction_id', $transactionId)->where('id', '<>', $contribution->id)->first();
+        if ($duplicated !== null) {
+            throw new ApiException(409, 'ID de transacao ja cadastrado. Ele aparece apenas uma vez no historico.');
+        }
+
+        $mime = strtolower(trim((string) $request->input('receiptMimeType', 'image/jpeg')));
+        $receiptDate = now('America/Sao_Paulo')->format('Y-m-d');
+        $submittedAt = $this->nowMs();
+        $prefix = $side === 'SENDER' ? 'sender' : 'receiver';
+        DB::table('contributions')->where('id', $contribution->id)->update([
+            'transaction_id' => $transactionId,
+            "{$prefix}_receipt_hash" => $hash,
+            "{$prefix}_receipt_image_base64" => $imageBase64,
+            "{$prefix}_receipt_mime_type" => $mime,
+            "{$prefix}_receipt_date" => $receiptDate,
+            "{$prefix}_receipt_submitted_at" => $submittedAt,
+        ]);
+        $updated = $this->contributionById($contribution->id);
+        $this->audit($user->id, "PIX_{$side}_RECEIPT_SUBMITTED", $contribution->id);
+
+        return response()->json([
+            'contributionId' => $contribution->id,
+            'transactionId' => $transactionId,
+            'side' => $side,
+            'receiptHash' => $hash,
+            'receiptImageBase64' => $imageBase64,
+            'receiptMimeType' => $mime,
+            'amountCents' => (int) $contribution->amount_cents,
+            'receiptDate' => $receiptDate,
+            'submittedAt' => $submittedAt,
+            'status' => 'PENDING_ADMIN',
+            'hasSenderReceipt' => $this->hasSenderReceipt($updated),
+            'hasReceiverReceipt' => $this->hasReceiverReceipt($updated),
+            'evidenceComplete' => $this->evidenceComplete($updated),
+        ], 201);
+    }
+
+    public function adminOverview(Request $request): JsonResponse
+    {
+        $this->requireAdmin($request);
+        $stats = $this->dashboardStats();
+        $roadmap = RoadmapRules::currentStep($this->levelCounts());
+        return response()->json([
+            'communityLiquidityCents' => $stats['liquidityCents'],
+            'inCirculationCents' => $stats['inCirculationCents'],
+            'completionPercent' => $stats['completionPercent'],
+            'activeRequests' => $stats['activeRequests'],
+            'completedOperations' => $stats['completedOperations'],
+            'activeUsers' => $stats['activeUsers'],
+            'totalUsers' => DB::table('users')->count(),
+            'pendingUsers' => DB::table('users')->where('status', 'PENDING_REVIEW')->count(),
+            'blockedUsers' => DB::table('users')->where('status', 'BLOCKED')->count(),
+            'pendingRequests' => DB::table('support_requests')->where('status', 'PENDING_ADMIN')->count(),
+            'openRequests' => DB::table('support_requests')->where('status', 'OPEN')->count(),
+            'fundedRequests' => DB::table('support_requests')->where('status', 'FUNDED')->count(),
+            'pendingContributions' => DB::table('contributions')->where('status', 'PENDING_ADMIN')->count(),
+            'pendingReceipts' => DB::table('contributions')->where('status', 'PENDING_ADMIN')
+                ->where(function ($query) {
+                    $query->whereNull('sender_receipt_hash')->orWhereNull('sender_receipt_image_base64')
+                        ->orWhereNull('receiver_receipt_hash')->orWhereNull('receiver_receipt_image_base64');
+                })->count(),
+            'adminFeeDueCents' => (int) DB::table('users')->sum('admin_fee_due_cents'),
+            'roadmapStep' => $roadmap['step'],
+            'roadmapCapacity' => $roadmap['capacity'],
+            'generatedAt' => $this->nowMs(),
+        ]);
+    }
+
+    public function auditLogs(Request $request): JsonResponse
+    {
+        $this->requireAdmin($request);
+        $limit = min(max((int) $request->query('limit', 80), 1), 250);
+        return response()->json(DB::table('audit_logs')
+            ->leftJoin('users', 'users.id', '=', 'audit_logs.actor_user_id')
+            ->select('audit_logs.id', 'users.public_id as actorPublicId', 'audit_logs.action', 'audit_logs.target', 'audit_logs.created_at_ms as createdAt')
+            ->orderByDesc('audit_logs.created_at_ms')
+            ->limit($limit)
+            ->get());
+    }
+
+    public function adminUsers(Request $request): JsonResponse
+    {
+        $this->requireAdmin($request);
+        return response()->json(DB::table('users')->orderByDesc('created_at_ms')->get()->map(fn ($user) => $this->adminUserResponse($user))->values());
+    }
+
+    public function adminApproveUser(Request $request, string $id): JsonResponse
+    {
+        $actor = $this->requireAdmin($request);
+        DB::table('users')->where('id', $id)->update(['status' => 'APPROVED']);
+        $this->audit($actor?->id, 'USER_STATUS_APPROVED', $id);
+        return $this->ok('Usuario aprovado.');
+    }
+
+    public function adminBlockUser(Request $request, string $id): JsonResponse
+    {
+        $actor = $this->requireAdmin($request);
+        DB::table('users')->where('id', $id)->update(['status' => 'BLOCKED']);
+        $this->audit($actor?->id, 'USER_STATUS_BLOCKED', $id);
+        return $this->ok('Usuario bloqueado.');
+    }
+
+    public function adminConfirmFee(Request $request, string $id): JsonResponse
+    {
+        $actor = $this->requireAdmin($request);
+        DB::table('users')->where('id', $id)->update(['admin_fee_due_cents' => 0, 'status' => 'APPROVED']);
+        $this->audit($actor?->id, 'ADMIN_FEE_RESET', $id);
+        return $this->ok('Taxa administrativa baixada.');
+    }
+
+    public function adminUpdateRole(Request $request, string $id): JsonResponse
+    {
+        $actor = $this->requireSuperAdmin($request);
+        $role = strtoupper(trim((string) $request->input('role', '')));
+        if (! in_array($role, ['USER', 'ADMIN', 'SUPER_ADMIN'], true)) {
+            throw new ApiException(400, 'Role invalido.');
+        }
+        DB::table('users')->where('id', $id)->update(['role' => $role]);
+        $this->audit($actor?->id, "USER_ROLE_{$role}", $id);
+        return $this->ok('Role atualizado.');
+    }
+
+    public function adminUpdateReputation(Request $request, string $id): JsonResponse
+    {
+        $actor = $this->requireAdmin($request);
+        $user = $this->userById($id);
+        if ($user === null) {
+            throw new ApiException(404, 'Usuario nao encontrado.');
+        }
+        $xp = max((int) $request->input('xp', $user->xp), 0);
+        $level = min(max((int) $request->input('level', ReputationRules::levelForXp($xp)), 1), 1000);
+        $buff = min(max((int) $request->input('buffBps', $user->buff_bps), 0), 10000);
+        $fee = max((int) $request->input('adminFeeDueCents', $user->admin_fee_due_cents), 0);
+        DB::table('users')->where('id', $id)->update(['xp' => $xp, 'level' => $level, 'buff_bps' => $buff, 'admin_fee_due_cents' => $fee]);
+        $this->audit($actor?->id, 'USER_REPUTATION_UPDATED', $id);
+        return $this->ok('Reputacao atualizada.');
+    }
+
+    public function adminResetDatabase(Request $request): JsonResponse
+    {
+        $this->requireSuperAdmin($request);
+        DB::transaction(function () {
+            DB::table('auth_tokens')->delete();
+            DB::table('pix_receipts')->delete();
+            DB::table('contributions')->delete();
+            DB::table('support_requests')->delete();
+            DB::table('audit_logs')->delete();
+            DB::table('users')->delete();
+        });
+        $this->ensureBootstrapSuperAdmin();
+        return $this->ok('Base de dados limpa. O Super Admin foi recriado.');
+    }
+
+    public function adminSupportRequests(Request $request): JsonResponse
+    {
+        $this->requireAdmin($request);
+        return response()->json(DB::table('support_requests')->orderByDesc('created_at_ms')->get()
+            ->map(fn ($support) => $this->adminSupportResponse($support, $this->userById($support->requester_id)))
+            ->values());
+    }
+
+    public function adminApproveRequest(Request $request, string $id): JsonResponse
+    {
+        $actor = $this->requireAdmin($request);
+        DB::transaction(function () use ($id, $actor) {
+            $support = $this->supportById($id);
+            if ($support === null) {
+                throw new ApiException(404, 'Solicitacao nao encontrada.');
+            }
+            $requester = $this->userById($support->requester_id);
+            if ($support->status !== 'PENDING_ADMIN') {
+                throw new ApiException(409, 'Solicitacao nao esta aguardando aprovacao.');
+            }
+            $fee = ReputationRules::adminFeeFor((int) $support->amount_cents);
+            $feeLimit = ReputationRules::adminFeeLimitCents((int) $requester->level);
+            $nextFeeDue = (int) $requester->admin_fee_due_cents + $fee;
+            if ((int) $requester->admin_fee_due_cents >= $feeLimit) {
+                DB::table('users')->where('id', $requester->id)->update(['status' => 'BLOCKED']);
+                throw new ApiException(409, 'Taxa administrativa pendente atingiu o limite do usuario.');
+            }
+            if ($nextFeeDue > $feeLimit) {
+                throw new ApiException(409, 'Taxa administrativa pendente excede o limite do usuario.');
+            }
+            $approvalTime = $this->nowMs();
+            DB::table('support_requests')->where('id', $id)->update([
+                'status' => 'OPEN',
+                'approved_at' => $approvalTime,
+                'due_at' => $approvalTime + (int) $support->due_days * 24 * 60 * 60 * 1000,
+            ]);
+            DB::table('users')->where('id', $requester->id)->update([
+                'admin_fee_due_cents' => $nextFeeDue,
+                'status' => $nextFeeDue >= $feeLimit ? 'BLOCKED' : $requester->status,
+            ]);
+            $this->audit($actor?->id, 'SUPPORT_REQUEST_APPROVED', $id);
+            if ($nextFeeDue >= $feeLimit) {
+                $this->audit($actor?->id, 'ADMIN_FEE_LIMIT_BLOCKED', $requester->id);
+            }
+        });
+        return $this->ok('Solicitacao aprovada.');
+    }
+
+    public function adminRejectRequest(Request $request, string $id): JsonResponse
+    {
+        $actor = $this->requireAdmin($request);
+        DB::table('support_requests')->where('id', $id)->where('status', 'PENDING_ADMIN')->update([
+            'status' => 'REJECTED',
+            'rejected_reason' => Str::limit((string) $request->input('reason', ''), 280, ''),
+        ]);
+        $this->audit($actor?->id, 'SUPPORT_REQUEST_REJECTED', $id);
+        return $this->ok('Solicitacao recusada.');
+    }
+
+    public function adminConfirmReturn(Request $request, string $id): JsonResponse
+    {
+        $actor = $this->requireAdmin($request);
+        DB::transaction(function () use ($id, $actor) {
+            $support = $this->supportById($id);
+            if ($support === null || $support->status !== 'FUNDED') {
+                throw new ApiException(409, 'Solicitacao precisa estar completa antes do retorno.');
+            }
+            $requester = $this->userById($support->requester_id);
+            $returnedAt = $this->nowMs();
+            $timingColumn = $support->due_at !== null && $returnedAt < (int) $support->due_at ? 'early_returned_cents' : 'on_time_returned_cents';
+            $gainedXp = ReputationRules::xpForCompletedReturn((int) $support->amount_cents, (int) $requester->buff_bps);
+            $newXp = (int) $requester->xp + $gainedXp;
+            DB::table('support_requests')->where('id', $id)->update(['status' => 'RETURNED', 'returned_at' => $returnedAt]);
+            DB::table('users')->where('id', $requester->id)->update([
+                'xp' => $newXp,
+                'level' => ReputationRules::levelForXp($newXp),
+                $timingColumn => (int) $requester->{$timingColumn} + (int) $support->amount_cents,
+            ]);
+            $this->recalculateBuff($requester->id);
+            if ($requester->invited_by !== null) {
+                $this->recalculateBuff($requester->invited_by);
+            }
+            $this->audit($actor?->id, 'SUPPORT_RETURN_CONFIRMED', $id);
+        });
+        return $this->ok('Retorno validado e XP atualizado.');
+    }
+
+    public function adminContributions(Request $request): JsonResponse
+    {
+        $this->requireAdmin($request);
+        return response()->json($this->contributionHistoryQuery()
+            ->orderByDesc('contributions.created_at_ms')
+            ->get()
+            ->map(fn ($row) => $this->adminContributionResponse($row))
+            ->values());
+    }
+
+    public function adminConfirmContribution(Request $request, string $id): JsonResponse
+    {
+        $actor = $this->requireAdmin($request);
+        DB::transaction(function () use ($id, $actor) {
+            $contribution = $this->contributionById($id);
+            if ($contribution === null || $contribution->status !== 'PENDING_ADMIN') {
+                throw new ApiException(409, 'Apoio nao esta aguardando validacao.');
+            }
+            if (! $this->evidenceComplete($contribution)) {
+                throw new ApiException(409, 'Validacao exige as duas fotos do Pix: envio e recebimento.');
+            }
+            $support = $this->supportById($contribution->request_id);
+            if (! in_array($support->status, ['OPEN', 'FUNDED'], true)) {
+                throw new ApiException(409, 'Solicitacao nao esta ativa.');
+            }
+            $remaining = max((int) $support->amount_cents - (int) $support->funded_cents, 0);
+            if ((int) $contribution->amount_cents > $remaining) {
+                throw new ApiException(409, 'Valor excede o saldo restante da solicitacao.');
+            }
+            $confirmedAt = $this->nowMs();
+            $newFunded = (int) $support->funded_cents + (int) $contribution->amount_cents;
+            DB::table('contributions')->where('id', $id)->update(['status' => 'CONFIRMED', 'confirmed_at' => $confirmedAt]);
+            DB::table('support_requests')->where('id', $support->id)->update([
+                'funded_cents' => $newFunded,
+                'status' => $newFunded >= (int) $support->amount_cents ? 'FUNDED' : 'OPEN',
+            ]);
+            $this->audit($actor?->id, 'CONTRIBUTION_CONFIRMED', $id);
+        });
+        return $this->ok('Apoio validado.');
+    }
+
+    private function requireUser(Request $request): object
+    {
+        $auth = $request->header('Authorization');
+        if ($auth === null || ! str_starts_with($auth, 'Bearer ')) {
+            throw new ApiException(401, 'Token ausente.');
+        }
+        $token = trim(substr($auth, 7));
+        if ($token === '') {
+            throw new ApiException(401, 'Token invalido.');
+        }
+        $row = DB::table('users')
+            ->join('auth_tokens', 'auth_tokens.user_id', '=', 'users.id')
+            ->where('auth_tokens.token_hash', $this->security->hashToken($token))
+            ->where('auth_tokens.expires_at', '>=', $this->nowMs())
+            ->select('users.*')
+            ->first();
+        if ($row === null) {
+            throw new ApiException(401, 'Sessao invalida.');
+        }
+        return $row;
+    }
+
+    private function requireAdmin(Request $request): ?object
+    {
+        $adminHeader = $request->header('X-Admin-Token');
+        if ($adminHeader !== null && hash_equals((string) config('nexora.admin_token'), $adminHeader)) {
+            return null;
+        }
+        $user = $this->requireUser($request);
+        if (! in_array($user->role, ['ADMIN', 'SUPER_ADMIN'], true)) {
+            throw new ApiException(403, 'Acesso administrativo restrito.');
+        }
+        return $user;
+    }
+
+    private function requireSuperAdmin(Request $request): ?object
+    {
+        $user = $this->requireAdmin($request);
+        if ($user === null) {
+            return null;
+        }
+        if ($user->role !== 'SUPER_ADMIN') {
+            throw new ApiException(403, 'Acesso de super admin restrito.');
+        }
+        return $user;
+    }
+
+    private function ok(string $message): JsonResponse
+    {
+        return response()->json(['ok' => true, 'message' => $message]);
+    }
+
+    private function profileResponse(object $user): array
+    {
+        return [
+            'id' => $user->id,
+            'publicId' => $user->public_id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'status' => $user->status,
+            'role' => $user->role,
+            'level' => (int) $user->level,
+            'xp' => (int) $user->xp,
+            'xpIntoLevel' => ReputationRules::xpIntoLevel((int) $user->xp),
+            'xpRequiredThisLevel' => ReputationRules::xpRequiredForLevel((int) $user->level),
+            'buffBps' => (int) $user->buff_bps,
+            'supportLimitCents' => ReputationRules::supportLimitCents((int) $user->level),
+            'inviteCode' => $user->invite_code,
+            'invitedCount' => DB::table('users')->where('invited_by', $user->id)->count(),
+            'adminFeeDueCents' => (int) $user->admin_fee_due_cents,
+            'adminFeeLimitCents' => ReputationRules::adminFeeLimitCents((int) $user->level),
+            'pixKeyMasked' => $this->maskPix($this->security->decrypt($user->pix_cipher)),
+            'adminPixKey' => (int) $user->admin_fee_due_cents > 0 ? config('nexora.admin_pix_key') : null,
+        ];
+    }
+
+    private function supportResponse(object $support, object $requester, bool $includeDescription): array
+    {
+        return [
+            'id' => $support->id,
+            'publicCode' => $support->public_code,
+            'requesterPublicId' => $requester->public_id,
+            'requesterLevel' => (int) $requester->level,
+            'amountCents' => (int) $support->amount_cents,
+            'fundedCents' => (int) $support->funded_cents,
+            'dueDays' => (int) $support->due_days,
+            'status' => $support->status,
+            'description' => $includeDescription ? $support->description : null,
+            'createdAt' => (int) $support->created_at_ms,
+        ];
+    }
+
+    private function adminUserResponse(object $user): array
+    {
+        return [
+            'id' => $user->id,
+            'publicId' => $user->public_id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'status' => $user->status,
+            'role' => $user->role,
+            'level' => (int) $user->level,
+            'xp' => (int) $user->xp,
+            'buffBps' => (int) $user->buff_bps,
+            'supportLimitCents' => ReputationRules::supportLimitCents((int) $user->level),
+            'adminFeeDueCents' => (int) $user->admin_fee_due_cents,
+            'adminFeeLimitCents' => ReputationRules::adminFeeLimitCents((int) $user->level),
+            'createdAt' => (int) $user->created_at_ms,
+        ];
+    }
+
+    private function adminSupportResponse(object $support, object $requester): array
+    {
+        return [
+            'id' => $support->id,
+            'publicCode' => $support->public_code,
+            'requesterPublicId' => $requester->public_id,
+            'requesterName' => $requester->name,
+            'amountCents' => (int) $support->amount_cents,
+            'fundedCents' => (int) $support->funded_cents,
+            'dueDays' => (int) $support->due_days,
+            'status' => $support->status,
+            'adminFeeCents' => ReputationRules::adminFeeFor((int) $support->amount_cents),
+            'description' => $support->description,
+            'createdAt' => (int) $support->created_at_ms,
+        ];
+    }
+
+    private function instructionResponse(object $contribution, object $support): array
+    {
+        $reference = $this->security->paymentReference($contribution->id);
+        $pixCode = config('nexora.admin_pix_key')
+            ? PixCopyCode::build((string) config('nexora.admin_pix_key'), (int) $contribution->amount_cents, $reference)
+            : $reference;
+
+        return [
+            'contributionId' => $contribution->id,
+            'requestPublicCode' => $support->public_code,
+            'receiverIdentifier' => $support->public_code,
+            'receiverPixKey' => '',
+            'pixCopyCode' => $pixCode,
+            'amountCents' => (int) $contribution->amount_cents,
+            'message' => config('nexora.admin_pix_key')
+                ? 'Copie o codigo Pix da plataforma. Depois da transferencia, anexe o ID e a foto no historico.'
+                : 'Codigo interno gerado. Configure a chave Pix da plataforma para gerar um Pix copia e cola bancario.',
+        ];
+    }
+
+    private function contributionHistoryQuery()
+    {
+        return DB::table('contributions')
+            ->join('support_requests', 'support_requests.id', '=', 'contributions.request_id')
+            ->join('users as donor', 'donor.id', '=', 'contributions.donor_id')
+            ->join('users as requester', 'requester.id', '=', 'support_requests.requester_id')
+            ->select(
+                'contributions.*',
+                'support_requests.public_code as request_public_code',
+                'support_requests.requester_id as requester_id',
+                'donor.public_id as donor_public_id',
+                'requester.public_id as requester_public_id',
+            );
+    }
+
+    private function historyResponse(object $row, string $currentUserId): array
+    {
+        return [
+            'id' => $row->id,
+            'transactionId' => $row->transaction_id,
+            'requestPublicCode' => $row->request_public_code,
+            'donorPublicId' => $row->donor_public_id,
+            'receiverPublicId' => $row->requester_public_id,
+            'direction' => $row->donor_id === $currentUserId ? 'SENT' : 'RECEIVED',
+            'amountCents' => (int) $row->amount_cents,
+            'status' => $row->status,
+            'createdAt' => (int) $row->created_at_ms,
+            'confirmedAt' => $row->confirmed_at === null ? null : (int) $row->confirmed_at,
+            'senderReceiptDate' => $row->sender_receipt_date,
+            'receiverReceiptDate' => $row->receiver_receipt_date,
+            'hasSenderReceipt' => $this->hasSenderReceipt($row),
+            'hasReceiverReceipt' => $this->hasReceiverReceipt($row),
+            'evidenceComplete' => $this->evidenceComplete($row),
+        ];
+    }
+
+    private function adminContributionResponse(object $row): array
+    {
+        return [
+            'id' => $row->id,
+            'requestPublicCode' => $row->request_public_code,
+            'donorPublicId' => $row->donor_public_id,
+            'receiverPublicId' => $row->requester_public_id,
+            'amountCents' => (int) $row->amount_cents,
+            'status' => $row->status,
+            'createdAt' => (int) $row->created_at_ms,
+            'confirmedAt' => $row->confirmed_at === null ? null : (int) $row->confirmed_at,
+            'transactionId' => $row->transaction_id,
+            'senderReceiptHash' => $row->sender_receipt_hash,
+            'senderReceiptDate' => $row->sender_receipt_date,
+            'senderReceiptImageBase64' => $row->sender_receipt_image_base64,
+            'senderReceiptMimeType' => $row->sender_receipt_mime_type,
+            'receiverReceiptHash' => $row->receiver_receipt_hash,
+            'receiverReceiptDate' => $row->receiver_receipt_date,
+            'receiverReceiptImageBase64' => $row->receiver_receipt_image_base64,
+            'receiverReceiptMimeType' => $row->receiver_receipt_mime_type,
+            'hasSenderReceipt' => $this->hasSenderReceipt($row),
+            'hasReceiverReceipt' => $this->hasReceiverReceipt($row),
+            'evidenceComplete' => $this->evidenceComplete($row),
+        ];
+    }
+
+    private function dashboardStats(): array
+    {
+        $liquidity = (int) DB::table('support_requests')->sum('funded_cents');
+        $inCirculation = (int) DB::table('support_requests')->whereIn('status', ['OPEN', 'FUNDED'])->sum('funded_cents');
+        $activeRequests = DB::table('support_requests')->whereIn('status', ['OPEN', 'FUNDED'])->count();
+        $completed = DB::table('support_requests')->where('status', 'RETURNED')->count();
+        $delayed = DB::table('support_requests')->where('status', 'FUNDED')->whereNotNull('due_at')->where('due_at', '<', $this->nowMs())->count();
+        return [
+            'liquidityCents' => $liquidity,
+            'inCirculationCents' => $inCirculation,
+            'completionPercent' => $completed + $delayed === 0 ? 100.0 : $completed * 100.0 / ($completed + $delayed),
+            'activeRequests' => $activeRequests,
+            'completedOperations' => $completed,
+            'activeUsers' => DB::table('users')->where('status', 'APPROVED')->count(),
+        ];
+    }
+
+    private function levelCounts(): array
+    {
+        return DB::table('users')
+            ->select('level', DB::raw('COUNT(*) as total'))
+            ->where('status', 'APPROVED')
+            ->groupBy('level')
+            ->pluck('total', 'level')
+            ->map(fn ($value) => (int) $value)
+            ->all();
+    }
+
+    private function availableContributionCents(object $support): int
+    {
+        $reserved = (int) DB::table('contributions')
+            ->where('request_id', $support->id)
+            ->whereIn('status', ['PENDING_ADMIN', 'CONFIRMED'])
+            ->sum('amount_cents');
+        return max((int) $support->amount_cents - $reserved, 0);
+    }
+
+    private function insertContribution(string $requestId, string $donorId, int $amountCents): object
+    {
+        $row = [
+            'id' => (string) Str::uuid(),
+            'request_id' => $requestId,
+            'donor_id' => $donorId,
+            'amount_cents' => $amountCents,
+            'status' => 'PENDING_ADMIN',
+            'created_at_ms' => $this->nowMs(),
+            'confirmed_at' => null,
+        ];
+        DB::table('contributions')->insert($row);
+        return (object) array_merge($row, [
+            'transaction_id' => null,
+            'sender_receipt_hash' => null,
+            'sender_receipt_image_base64' => null,
+            'sender_receipt_mime_type' => null,
+            'sender_receipt_date' => null,
+            'sender_receipt_submitted_at' => null,
+            'receiver_receipt_hash' => null,
+            'receiver_receipt_image_base64' => null,
+            'receiver_receipt_mime_type' => null,
+            'receiver_receipt_date' => null,
+            'receiver_receipt_submitted_at' => null,
+        ]);
+    }
+
+    private function recalculateBuff(string $userId): void
+    {
+        $user = $this->userById($userId);
+        if ($user === null) {
+            return;
+        }
+        $guestsAtLevelFive = DB::table('users')->where('invited_by', $userId)->where('level', '>=', 5)->count();
+        DB::table('users')->where('id', $userId)->update([
+            'buff_bps' => ReputationRules::recalculateBuffBps((int) $user->on_time_returned_cents, (int) $user->early_returned_cents, $guestsAtLevelFive),
+        ]);
+    }
+
+    private function validateReceiptImage(string $imageBase64, string $mimeType, string $expectedSha256): string
+    {
+        $cleanMime = strtolower(trim($mimeType));
+        if (! in_array($cleanMime, ['image/jpeg', 'image/png', 'image/webp'], true)) {
+            throw new ApiException(400, 'Foto do comprovante precisa ser JPG, PNG ou WebP.');
+        }
+        $cleanBase64 = trim(str_contains($imageBase64, 'base64,') ? substr($imageBase64, strpos($imageBase64, 'base64,') + 7) : $imageBase64);
+        if ($cleanBase64 === '') {
+            throw new ApiException(400, 'Foto do comprovante ausente.');
+        }
+        $bytes = base64_decode($cleanBase64, true);
+        if ($bytes === false) {
+            throw new ApiException(400, 'Foto do comprovante invalida.');
+        }
+        if (strlen($bytes) === 0 || strlen($bytes) > 2500000) {
+            throw new ApiException(400, 'Foto do comprovante deve ter ate 2,5 MB.');
+        }
+        if (hash('sha256', $bytes) !== strtolower($expectedSha256)) {
+            throw new ApiException(400, 'Hash da foto nao confere com o comprovante enviado.');
+        }
+        return $cleanBase64;
+    }
+
+    private function normalizeTransactionId(string $value): string
+    {
+        return implode('', array_filter(str_split(strtoupper(trim($value))), fn ($char) => ctype_alnum($char) || in_array($char, ['-', '_', '.', '/'], true)));
+    }
+
+    private function hasSenderReceipt(object $contribution): bool
+    {
+        return ! empty($contribution->sender_receipt_hash) && ! empty($contribution->sender_receipt_image_base64);
+    }
+
+    private function hasReceiverReceipt(object $contribution): bool
+    {
+        return ! empty($contribution->receiver_receipt_hash) && ! empty($contribution->receiver_receipt_image_base64);
+    }
+
+    private function evidenceComplete(object $contribution): bool
+    {
+        return $contribution->transaction_id !== null && $this->hasSenderReceipt($contribution) && $this->hasReceiverReceipt($contribution);
+    }
+
+    private function userByEmail(string $email): ?object
+    {
+        return DB::table('users')->where('email', $email)->first();
+    }
+
+    private function userById(string $id): ?object
+    {
+        return DB::table('users')->where('id', $id)->first();
+    }
+
+    private function supportById(string $id): ?object
+    {
+        return DB::table('support_requests')->where('id', $id)->first();
+    }
+
+    private function contributionById(string $id): ?object
+    {
+        return DB::table('contributions')->where('id', $id)->first();
+    }
+
+    private function uniquePublicId(): string
+    {
+        return $this->uniqueCode(fn () => $this->security->publicId(), 'users', 'public_id');
+    }
+
+    private function uniqueInviteCode(): string
+    {
+        return $this->uniqueCode(fn () => $this->security->inviteCode(), 'users', 'invite_code');
+    }
+
+    private function uniqueSupportCode(): string
+    {
+        return $this->uniqueCode(fn () => $this->security->supportCode(), 'support_requests', 'public_code');
+    }
+
+    private function uniqueCode(callable $factory, string $table, string $column): string
+    {
+        for ($i = 0; $i < 20; $i++) {
+            $code = $factory();
+            if (! DB::table($table)->where($column, $code)->exists()) {
+                return $code;
+            }
+        }
+        throw new ApiException(500, 'Nao foi possivel gerar identificador unico.');
+    }
+
+    private function audit(?string $actorUserId, string $action, string $target): void
+    {
+        DB::table('audit_logs')->insert([
+            'id' => (string) Str::uuid(),
+            'actor_user_id' => $actorUserId,
+            'action' => $action,
+            'target' => $target,
+            'created_at_ms' => $this->nowMs(),
+        ]);
+    }
+
+    private function ensureBootstrapSuperAdmin(): void
+    {
+        $password = config('nexora.super_admin_password');
+        $email = config('nexora.super_admin_email');
+        $cpf = (string) config('nexora.super_admin_cpf');
+        if (! $password || strlen($password) < 8 || ! CpfValidator::isValid($cpf)) {
+            return;
+        }
+        $existing = $this->userByEmail($email);
+        if ($existing !== null) {
+            if ($existing->role !== 'SUPER_ADMIN' || $existing->status !== 'APPROVED') {
+                DB::table('users')->where('id', $existing->id)->update(['role' => 'SUPER_ADMIN', 'status' => 'APPROVED']);
+            }
+            return;
+        }
+        $now = $this->nowMs();
+        $id = (string) Str::uuid();
+        DB::table('users')->insert([
+            'id' => $id,
+            'public_id' => $this->uniquePublicId(),
+            'name' => 'Fundador Nexora',
+            'email' => $email,
+            'email_verified' => true,
+            'verification_code_hash' => null,
+            'verification_expires_at' => null,
+            'cpf_hash' => $this->security->hashCpf($cpf),
+            'cpf_cipher' => $this->security->encrypt($cpf),
+            'pix_cipher' => $this->security->encrypt(config('nexora.admin_pix_key') ?: $cpf),
+            'password_hash' => $this->security->hashPassword($password),
+            'status' => 'APPROVED',
+            'role' => 'SUPER_ADMIN',
+            'xp' => 0,
+            'level' => 1,
+            'buff_bps' => 0,
+            'on_time_returned_cents' => 0,
+            'early_returned_cents' => 0,
+            'invited_by' => null,
+            'invite_code' => $this->uniqueInviteCode(),
+            'created_at_ms' => $now,
+            'admin_fee_due_cents' => 0,
+        ]);
+        $this->audit($id, 'SUPER_ADMIN_BOOTSTRAPPED', $id);
+    }
+
+    private function sendVerificationCode(string $to, string $name, string $code): void
+    {
+        if (! $this->mailConfigured()) {
+            Log::info("NEXORA DEV EMAIL: verification code for {$to} is {$code}");
+            return;
+        }
+        Mail::raw("Ola, {$name}.\n\nSeu codigo de verificacao Nexora e: {$code}\n\nO codigo expira em 30 minutos.", function ($message) use ($to) {
+            $message->to($to)->subject('Codigo de verificacao Nexora');
+        });
+    }
+
+    private function sendRecoveryCode(string $to, string $code): void
+    {
+        if (! $this->mailConfigured()) {
+            Log::info("NEXORA DEV EMAIL: recovery code for {$to} is {$code}");
+            return;
+        }
+        Mail::raw("Seu codigo de recuperacao Nexora e: {$code}\n\nO codigo expira em 30 minutos.", function ($message) use ($to) {
+            $message->to($to)->subject('Recuperacao de acesso Nexora');
+        });
+    }
+
+    private function mailConfigured(): bool
+    {
+        return filled(config('mail.mailers.smtp.username')) && filled(config('mail.mailers.smtp.password'));
+    }
+
+    private function maskPix(string $value): string
+    {
+        $clean = trim($value);
+        if (strlen($clean) <= 6) {
+            return '***';
+        }
+        return substr($clean, 0, min(3, strlen($clean))).'***'.substr($clean, -min(3, strlen($clean)));
+    }
+
+    private function isProduction(): bool
+    {
+        return strtolower((string) config('nexora.env')) === 'prod';
+    }
+
+    private function nowMs(): int
+    {
+        return (int) floor(microtime(true) * 1000);
+    }
+}
