@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use App\Database\NeonPostgresConnector;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -11,7 +12,8 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        $this->configureNeonEndpointOption();
+        $this->app->bind('db.connector.pgsql', fn () => new NeonPostgresConnector());
     }
 
     /**
@@ -20,5 +22,32 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         //
+    }
+
+    private function configureNeonEndpointOption(): void
+    {
+        if (getenv('PGOPTIONS')) {
+            return;
+        }
+
+        $databaseUrl = env('DATABASE_URL') ?: env('POSTGRES_URL') ?: env('DB_URL');
+        $host = $databaseUrl ? parse_url((string) $databaseUrl, PHP_URL_HOST) : null;
+        $host = $host ?: env('DB_HOST') ?: env('PGHOST') ?: env('POSTGRES_HOST');
+
+        if (! is_string($host) || $host === '') {
+            return;
+        }
+
+        $firstLabel = explode('.', trim($host))[0] ?? '';
+        if (! str_starts_with($firstLabel, 'ep-')) {
+            return;
+        }
+
+        $endpointId = preg_replace('/-pooler$/', '', $firstLabel);
+        $options = "endpoint={$endpointId}";
+
+        putenv("PGOPTIONS={$options}");
+        $_ENV['PGOPTIONS'] = $options;
+        $_SERVER['PGOPTIONS'] = $options;
     }
 }
