@@ -1,29 +1,9 @@
 <?php
 
 use App\Http\Controllers\NexoraController;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/health', [NexoraController::class, 'health']);
-Route::get('/_diag', function () {
-    try {
-        $userCount = DB::table('users')->count();
-    } catch (Throwable $error) {
-        $userCount = 'error: '.$error->getMessage();
-    }
-
-    return response()->json([
-        'appEnv' => app()->environment(),
-        'dbDefault' => config('database.default'),
-        'pgsqlHostPresent' => filled(config('database.connections.pgsql.host')),
-        'databaseUrlPresent' => filled(env('DATABASE_URL')),
-        'postgresUrlPresent' => filled(env('POSTGRES_URL')),
-        'dbConnectionEnvPresent' => filled(env('DB_CONNECTION')),
-        'nexoraPasswordPresent' => filled(config('nexora.super_admin_password')),
-        'nexoraDataKeyPresent' => filled(config('nexora.data_key_b64')),
-        'users' => $userCount,
-    ]);
-});
 
 Route::prefix('auth')->middleware('throttle:12,1')->group(function () {
     Route::post('/register', [NexoraController::class, 'register'])->middleware('throttle:5,5');
