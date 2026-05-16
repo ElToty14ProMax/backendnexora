@@ -353,8 +353,12 @@ class NexoraController extends Controller
             throw new ApiException(400, 'Nao e possivel apoiar a propria solicitacao.');
         }
         $amountCents = (int) $request->input('amountCents', 0);
-        if ($amountCents <= 0 || $amountCents > $this->availableContributionCents($support)) {
-            throw new ApiException(400, 'Valor de apoio invalido.');
+        $available = $this->availableContributionCents($support);
+        if ($amountCents <= 0 || $amountCents > $available) {
+            if ($available <= 0) {
+                throw new ApiException(400, 'Esta solicitação já está totalmente reservada ou concluída por outros usuários.');
+            }
+            throw new ApiException(400, 'Valor de apoio inválido. O máximo disponível para esta solicitação no momento é R$ ' . number_format($available / 100, 2, ',', '.'));
         }
 
         $contribution = DB::transaction(fn () => $this->insertContribution($support->id, $donor->id, $amountCents));
