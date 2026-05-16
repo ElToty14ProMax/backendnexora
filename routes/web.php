@@ -2,4 +2,7 @@
 
 use Illuminate\Support\Facades\Route;
 
-Route::redirect('/', '/admin-web/index.html');
+Route::get('/', fn () => response()->json([
+    'ok' => true,
+    'message' => 'nexora-backend-laravel',
+]));

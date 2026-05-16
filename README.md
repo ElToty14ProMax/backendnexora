@@ -1,6 +1,6 @@
 # Nexora Laravel Backend
 
-Laravel/PostgreSQL port of the Nexora API. The Kotlin backend remains in `../backend`; this service is the new API target for the Android app.
+Laravel/PostgreSQL port of the Nexora API. The Kotlin backend remains in `../backend`; this service is now API-only. The React web app lives in `../nexora-web`.
 
 ## Local PostgreSQL Setup
 
@@ -53,7 +53,6 @@ The Laravel routes intentionally match the previous Ktor backend:
 - `/me`, `/dashboard`, `/community`
 - `/support-requests/...`
 - `/admin/...`
-- `/admin-web/index.html`
 
 Pix instructions return a platform Pix copy/paste code and keep receiver Pix keys private. Receipt dates are assigned by the server when evidence is submitted.
 
