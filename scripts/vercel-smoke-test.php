@@ -245,7 +245,15 @@ try {
 
     $contribution = record($results, 'POST /support-requests/{id}/contributions', api('POST', '/support-requests/'.$supportId.'/contributions', [
         'amountCents' => 2000,
-    ], bearer($donorToken)), [201], fn ($json) => isset($json['contributionId'], $json['pixCopyCode']) && ($json['receiverPixKey'] ?? 'not-empty') === '');
+    ], bearer($donorToken)), [201], function ($json) use ($requesterEmail) {
+        $code = is_array($json) ? (string) ($json['pixCopyCode'] ?? '') : '';
+        $adminPixKey = (string) config('nexora.admin_pix_key');
+        return isset($json['contributionId'])
+            && $code !== ''
+            && str_contains($code, $requesterEmail)
+            && ($adminPixKey === '' || ! str_contains($code, $adminPixKey))
+            && ($json['receiverPixKey'] ?? 'not-empty') === '';
+    });
     $contributionId = requireJsonValue($contribution, 'contributionId');
 
     $txId = 'CODX-'.$runId.'-A';
