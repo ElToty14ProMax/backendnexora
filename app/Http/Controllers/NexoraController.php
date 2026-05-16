@@ -71,12 +71,12 @@ class NexoraController extends Controller
         if ($inviteCode !== '') {
             $inviter = DB::table('users')->where('invite_code', strtoupper($inviteCode))->first();
             if ($inviter === null) {
-                throw new ApiException(400, 'Codigo de convite invalido.');
+                throw new ApiException(400, 'Código de convite inválido.');
             }
         }
 
         if ($email === config('nexora.super_admin_email') && $cpf !== config('nexora.super_admin_cpf')) {
-            throw new ApiException(403, 'Dados do fundador nao conferem.');
+            throw new ApiException(403, 'Dados do fundador não conferem.');
         }
 
         $role = match (true) {
@@ -134,7 +134,7 @@ class NexoraController extends Controller
             ]);
             $this->sendVerificationCode($email, $user->name, $code);
         }
-        return $this->ok('Se o cadastro existir, um novo codigo sera enviado.');
+        return $this->ok('Se o cadastro existir, um novo código será enviado.');
     }
 
     public function recoverPassword(Request $request): JsonResponse
@@ -149,7 +149,7 @@ class NexoraController extends Controller
             ]);
             $this->sendRecoveryCode($email, $code);
         }
-        return $this->ok('Se o e-mail existir, enviaremos instrucoes de recuperacao.');
+        return $this->ok('Se o e-mail existir, enviaremos instruções de recuperação.');
     }
 
     public function resetPassword(Request $request): JsonResponse
@@ -169,7 +169,7 @@ class NexoraController extends Controller
                 'password_reset_expires_at' => null,
             ]);
         if ($updated !== 1) {
-            throw new ApiException(400, 'Codigo invalido ou expirado.');
+            throw new ApiException(400, 'Código inválido ou expirado.');
         }
         $this->audit(null, 'PASSWORD_RESET', 'email:'.crc32($email));
         return $this->ok('Senha atualizada.');
@@ -188,9 +188,9 @@ class NexoraController extends Controller
                 'verification_expires_at' => null,
             ]);
         if ($updated !== 1) {
-            throw new ApiException(400, 'Codigo invalido ou expirado.');
+            throw new ApiException(400, 'Código inválido ou expirado.');
         }
-        return $this->ok('E-mail verificado. Aguarde a validacao manual se necessario.');
+        return $this->ok('E-mail verificado. Aguarde a validação manual se necessário.');
     }
 
     public function login(Request $request): JsonResponse
@@ -209,7 +209,7 @@ class NexoraController extends Controller
             throw new ApiException(403, 'Verifique seu e-mail antes de entrar.');
         }
         if ($user->status === 'BLOCKED') {
-            throw new ApiException(403, 'Conta bloqueada para novas acoes.');
+            throw new ApiException(403, 'Conta bloqueada para novas ações.');
         }
 
         $token = $this->security->newToken();
@@ -289,7 +289,7 @@ class NexoraController extends Controller
     {
         $user = $this->requireUser($request);
         if ($user->status !== 'APPROVED') {
-            throw new ApiException(403, 'Conta aguardando validacao manual.');
+            throw new ApiException(403, 'Conta aguardando validação manual.');
         }
         if (! ReputationRules::canRequestHelp($user)) {
             throw new ApiException(403, 'Para solicitar ajuda, e necessario estar no Nivel 2, com pelo menos 100 XP.');
@@ -340,17 +340,17 @@ class NexoraController extends Controller
     {
         $donor = $this->requireUser($request);
         if ($donor->status !== 'APPROVED') {
-            throw new ApiException(403, 'Conta aguardando validacao manual.');
+            throw new ApiException(403, 'Conta aguardando validação manual.');
         }
         $support = $this->supportById($id);
         if ($support === null) {
-            throw new ApiException(404, 'Solicitacao nao encontrada.');
+            throw new ApiException(404, 'Solicitação não encontrada.');
         }
         if ($support->status !== 'OPEN') {
-            throw new ApiException(409, 'Solicitacao nao esta aberta para novos apoios.');
+            throw new ApiException(409, 'Solicitação não está aberta para novos apoios.');
         }
         if ($support->requester_id === $donor->id) {
-            throw new ApiException(400, 'Nao e possivel apoiar a propria solicitacao.');
+            throw new ApiException(400, 'Não é possível apoiar a própria solicitação.');
         }
         $amountCents = (int) $request->input('amountCents', 0);
         $available = $this->availableContributionCents($support);
@@ -371,7 +371,7 @@ class NexoraController extends Controller
     {
         $donor = $this->requireUser($request);
         if ($donor->status !== 'APPROVED') {
-            throw new ApiException(403, 'Conta aguardando validacao manual.');
+            throw new ApiException(403, 'Conta aguardando validação manual.');
         }
         $total = (int) $request->input('amountCents', 0);
         if ($total <= 0) {
@@ -406,7 +406,7 @@ class NexoraController extends Controller
         });
 
         if ($created === []) {
-            throw new ApiException(409, 'Nao ha solicitacoes abertas de outras pessoas para distribuir esse valor. A sua propria solicitacao nao pode receber seu proprio Pix.');
+            throw new ApiException(409, 'Não há solicitações abertas de outras pessoas para distribuir esse valor. A sua própria solicitação não pode receber seu próprio Pix.');
         }
         $instructions = array_map(fn ($item) => $this->instructionResponse($item[0], $item[1]), $created);
         $allocated = array_sum(array_column($instructions, 'amountCents'));
@@ -415,7 +415,7 @@ class NexoraController extends Controller
             'allocatedAmountCents' => $allocated,
             'unallocatedAmountCents' => max($total - $allocated, 0),
             'instructions' => $instructions,
-            'message' => 'Pix fracionado por ordem cronologica. Use cada codigo Pix do destinatario e envie os comprovantes depois da transferencia.',
+            'message' => 'Pix fracionado por ordem cronológica. Use cada código Pix do destinatário e envie os comprovantes depois da transferência.',
         ], 201);
     }
 
@@ -424,7 +424,7 @@ class NexoraController extends Controller
         $user = $this->requireUser($request);
         $contribution = $this->contributionById($id);
         if ($contribution === null) {
-            throw new ApiException(404, 'Apoio nao encontrado.');
+            throw new ApiException(404, 'Apoio não encontrado.');
         }
         $support = $this->supportById($contribution->request_id);
         $side = strtoupper(trim((string) $request->input('side', 'SENDER')));
@@ -438,7 +438,7 @@ class NexoraController extends Controller
             throw new ApiException(409, 'Apenas quem recebeu o Pix pode anexar a foto de recebimento.');
         }
         if ((int) $contribution->amount_cents !== (int) $request->input('amountCents', 0)) {
-            throw new ApiException(409, 'Valor do comprovante nao confere.');
+            throw new ApiException(409, 'Valor do comprovante não confere.');
         }
         $hash = strtolower(trim((string) $request->input('receiptHash', '')));
         if (! $this->security->isValidSha256($hash)) {
@@ -447,14 +447,14 @@ class NexoraController extends Controller
         $imageBase64 = $this->validateReceiptImage((string) $request->input('receiptImageBase64', ''), (string) $request->input('receiptMimeType', 'image/jpeg'), $hash);
         $transactionId = $this->normalizeTransactionId((string) $request->input('transactionId', ''));
         if (strlen($transactionId) < 6 || strlen($transactionId) > 80) {
-            throw new ApiException(400, 'ID da transacao invalido.');
+            throw new ApiException(400, 'ID da transação inválido.');
         }
         if ($contribution->transaction_id !== null && $contribution->transaction_id !== $transactionId) {
-            throw new ApiException(409, 'Este apoio ja possui outro ID de transacao.');
+            throw new ApiException(409, 'Este apoio já possui outro ID de transação.');
         }
         $duplicated = DB::table('contributions')->where('transaction_id', $transactionId)->where('id', '<>', $contribution->id)->first();
         if ($duplicated !== null) {
-            throw new ApiException(409, 'ID de transacao ja cadastrado. Ele aparece apenas uma vez no historico.');
+            throw new ApiException(409, 'ID de transação já cadastrado. Ele aparece apenas uma vez no histórico.');
         }
 
         $mime = strtolower(trim((string) $request->input('receiptMimeType', 'image/jpeg')));
@@ -535,7 +535,32 @@ class NexoraController extends Controller
     public function adminUsers(Request $request): JsonResponse
     {
         $this->requireAdmin($request);
-        return response()->json(DB::table('users')->orderByDesc('created_at_ms')->get()->map(fn ($user) => $this->adminUserResponse($user))->values());
+        $query = DB::table('users');
+        $search = trim((string) $request->query('search', ''));
+        if ($search !== '') {
+            $digits = CpfValidator::digits($search);
+            $query->where(function ($builder) use ($search, $digits) {
+                $like = '%'.strtolower($search).'%';
+                $builder->whereRaw('LOWER(name) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(email) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(public_id) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(invite_code) LIKE ?', [$like]);
+                if (strlen($digits) === 11) {
+                    $builder->orWhere('cpf_hash', $this->security->hashCpf($digits));
+                }
+            });
+        }
+        $status = strtoupper(trim((string) $request->query('status', '')));
+        if ($status !== '' && $status !== 'ALL') {
+            $query->where('status', $status);
+        }
+        $role = strtoupper(trim((string) $request->query('role', '')));
+        if ($role !== '' && $role !== 'ALL') {
+            $query->where('role', $role);
+        }
+        $this->applyDateFilter($query, 'created_at_ms', $request);
+
+        return response()->json($query->orderByDesc('created_at_ms')->get()->map(fn ($user) => $this->adminUserResponse($user))->values());
     }
 
     public function adminApproveUser(Request $request, string $id): JsonResponse
@@ -543,7 +568,7 @@ class NexoraController extends Controller
         $actor = $this->requireAdmin($request);
         DB::table('users')->where('id', $id)->update(['status' => 'APPROVED']);
         $this->audit($actor?->id, 'USER_STATUS_APPROVED', $id);
-        return $this->ok('Usuario aprovado.');
+        return $this->ok('Usuário aprovado.');
     }
 
     public function adminBlockUser(Request $request, string $id): JsonResponse
@@ -551,7 +576,7 @@ class NexoraController extends Controller
         $actor = $this->requireAdmin($request);
         DB::table('users')->where('id', $id)->update(['status' => 'BLOCKED']);
         $this->audit($actor?->id, 'USER_STATUS_BLOCKED', $id);
-        return $this->ok('Usuario bloqueado.');
+        return $this->ok('Usuário bloqueado.');
     }
 
     public function adminConfirmFee(Request $request, string $id): JsonResponse
@@ -579,7 +604,7 @@ class NexoraController extends Controller
         $actor = $this->requireAdmin($request);
         $user = $this->userById($id);
         if ($user === null) {
-            throw new ApiException(404, 'Usuario nao encontrado.');
+            throw new ApiException(404, 'Usuário não encontrado.');
         }
         $xp = max((int) $request->input('xp', $user->xp), 0);
         $level = min(max((int) $request->input('level', ReputationRules::levelForXp($xp)), 1), 1000);
@@ -608,7 +633,27 @@ class NexoraController extends Controller
     public function adminSupportRequests(Request $request): JsonResponse
     {
         $this->requireAdmin($request);
-        return response()->json(DB::table('support_requests')->orderByDesc('created_at_ms')->get()
+        $query = DB::table('support_requests')
+            ->join('users as requester', 'requester.id', '=', 'support_requests.requester_id')
+            ->select('support_requests.*');
+
+        $search = trim((string) $request->query('search', ''));
+        if ($search !== '') {
+            $like = '%'.strtolower($search).'%';
+            $query->where(function ($builder) use ($like) {
+                $builder->whereRaw('LOWER(support_requests.public_code) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(requester.name) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(requester.email) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(requester.public_id) LIKE ?', [$like]);
+            });
+        }
+        $status = strtoupper(trim((string) $request->query('status', '')));
+        if ($status !== '' && $status !== 'ALL') {
+            $query->where('support_requests.status', $status);
+        }
+        $this->applyDateFilter($query, 'support_requests.created_at_ms', $request);
+
+        return response()->json($query->orderByDesc('support_requests.created_at_ms')->get()
             ->map(fn ($support) => $this->adminSupportResponse($support, $this->userById($support->requester_id)))
             ->values());
     }
@@ -619,21 +664,21 @@ class NexoraController extends Controller
         DB::transaction(function () use ($id, $actor) {
             $support = $this->supportById($id);
             if ($support === null) {
-                throw new ApiException(404, 'Solicitacao nao encontrada.');
+                throw new ApiException(404, 'Solicitação não encontrada.');
             }
             $requester = $this->userById($support->requester_id);
             if ($support->status !== 'PENDING_ADMIN') {
-                throw new ApiException(409, 'Solicitacao nao esta aguardando aprovacao.');
+                throw new ApiException(409, 'Solicitação não está aguardando aprovação.');
             }
             $fee = ReputationRules::adminFeeFor((int) $support->amount_cents);
             $feeLimit = ReputationRules::adminFeeLimitCents((int) $requester->level);
             $nextFeeDue = (int) $requester->admin_fee_due_cents + $fee;
             if ((int) $requester->admin_fee_due_cents >= $feeLimit) {
                 DB::table('users')->where('id', $requester->id)->update(['status' => 'BLOCKED']);
-                throw new ApiException(409, 'Taxa administrativa pendente atingiu o limite do usuario.');
+                throw new ApiException(409, 'Taxa administrativa pendente atingiu o limite do usuário.');
             }
             if ($nextFeeDue > $feeLimit) {
-                throw new ApiException(409, 'Taxa administrativa pendente excede o limite do usuario.');
+                throw new ApiException(409, 'Taxa administrativa pendente excede o limite do usuário.');
             }
             $approvalTime = $this->nowMs();
             DB::table('support_requests')->where('id', $id)->update([
@@ -695,7 +740,46 @@ class NexoraController extends Controller
     public function adminContributions(Request $request): JsonResponse
     {
         $this->requireAdmin($request);
-        return response()->json($this->contributionHistoryQuery()
+        $query = $this->contributionHistoryQuery();
+
+        $search = trim((string) $request->query('search', ''));
+        if ($search !== '') {
+            $like = '%'.strtolower($search).'%';
+            $query->where(function ($builder) use ($like) {
+                $builder->whereRaw('LOWER(contributions.id) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(contributions.transaction_id) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(support_requests.public_code) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(donor.name) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(donor.email) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(donor.public_id) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(requester.name) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(requester.email) LIKE ?', [$like])
+                    ->orWhereRaw('LOWER(requester.public_id) LIKE ?', [$like]);
+            });
+        }
+        $status = strtoupper(trim((string) $request->query('status', '')));
+        if ($status !== '' && $status !== 'ALL') {
+            $query->where('contributions.status', $status);
+        }
+        $receipt = strtolower(trim((string) $request->query('receipt', '')));
+        if ($receipt === 'complete') {
+            $query->whereNotNull('contributions.transaction_id')
+                ->whereNotNull('contributions.sender_receipt_hash')
+                ->whereNotNull('contributions.sender_receipt_image_base64')
+                ->whereNotNull('contributions.receiver_receipt_hash')
+                ->whereNotNull('contributions.receiver_receipt_image_base64');
+        } elseif ($receipt === 'missing') {
+            $query->where(function ($builder) {
+                $builder->whereNull('contributions.transaction_id')
+                    ->orWhereNull('contributions.sender_receipt_hash')
+                    ->orWhereNull('contributions.sender_receipt_image_base64')
+                    ->orWhereNull('contributions.receiver_receipt_hash')
+                    ->orWhereNull('contributions.receiver_receipt_image_base64');
+            });
+        }
+        $this->applyDateFilter($query, 'contributions.created_at_ms', $request);
+
+        return response()->json($query
             ->orderByDesc('contributions.created_at_ms')
             ->get()
             ->map(fn ($row) => $this->adminContributionResponse($row))
@@ -708,14 +792,14 @@ class NexoraController extends Controller
         DB::transaction(function () use ($id, $actor) {
             $contribution = $this->contributionById($id);
             if ($contribution === null || $contribution->status !== 'PENDING_ADMIN') {
-                throw new ApiException(409, 'Apoio nao esta aguardando validacao.');
+                throw new ApiException(409, 'Apoio não está aguardando validação.');
             }
             if (! $this->evidenceComplete($contribution)) {
                 throw new ApiException(409, 'Validacao exige as duas fotos do Pix: envio e recebimento.');
             }
             $support = $this->supportById($contribution->request_id);
             if (! in_array($support->status, ['OPEN', 'FUNDED'], true)) {
-                throw new ApiException(409, 'Solicitacao nao esta ativa.');
+                throw new ApiException(409, 'Solicitação não está ativa.');
             }
             $remaining = max((int) $support->amount_cents - (int) $support->funded_cents, 0);
             if ((int) $contribution->amount_cents > $remaining) {
@@ -750,7 +834,7 @@ class NexoraController extends Controller
             ->select('users.*')
             ->first();
         if ($row === null) {
-            throw new ApiException(401, 'Sessao invalida.');
+            throw new ApiException(401, 'Sessão inválida.');
         }
         return $row;
     }
@@ -827,11 +911,18 @@ class NexoraController extends Controller
 
     private function adminUserResponse(object $user): array
     {
+        $inviter = $user->invited_by !== null ? $this->userById($user->invited_by) : null;
+
         return [
             'id' => $user->id,
             'publicId' => $user->public_id,
             'name' => $user->name,
             'email' => $user->email,
+            'cpf' => $this->security->decrypt($user->cpf_cipher),
+            'pixKey' => $this->security->decrypt($user->pix_cipher),
+            'inviteCode' => $user->invite_code,
+            'invitedByPublicId' => $inviter?->public_id,
+            'invitedCount' => DB::table('users')->where('invited_by', $user->id)->count(),
             'status' => $user->status,
             'role' => $user->role,
             'level' => (int) $user->level,
@@ -840,6 +931,7 @@ class NexoraController extends Controller
             'supportLimitCents' => ReputationRules::supportLimitCents((int) $user->level),
             'adminFeeDueCents' => (int) $user->admin_fee_due_cents,
             'adminFeeLimitCents' => ReputationRules::adminFeeLimitCents((int) $user->level),
+            'adminPixKey' => config('nexora.admin_pix_key'),
             'createdAt' => (int) $user->created_at_ms,
         ];
     }
@@ -851,6 +943,9 @@ class NexoraController extends Controller
             'publicCode' => $support->public_code,
             'requesterPublicId' => $requester->public_id,
             'requesterName' => $requester->name,
+            'requesterEmail' => $requester->email,
+            'requesterCpf' => $this->security->decrypt($requester->cpf_cipher),
+            'requesterPixKey' => $this->security->decrypt($requester->pix_cipher),
             'amountCents' => (int) $support->amount_cents,
             'fundedCents' => (int) $support->funded_cents,
             'dueDays' => (int) $support->due_days,
@@ -866,7 +961,7 @@ class NexoraController extends Controller
         $reference = $this->security->paymentReference($contribution->id);
         $requester = $this->userById($support->requester_id);
         if ($requester === null) {
-            throw new ApiException(404, 'Destinatario da solicitacao nao encontrado.');
+            throw new ApiException(404, 'Destinatário da solicitação não encontrado.');
         }
         $receiverPixKey = trim($this->security->decrypt($requester->pix_cipher));
         $receiverName = (string) $requester->name;
@@ -890,7 +985,7 @@ class NexoraController extends Controller
             'receiverPixKey' => '',
             'pixCopyCode' => $pixCode,
             'amountCents' => (int) $contribution->amount_cents,
-            'message' => 'Copie o codigo Pix do destinatario. Depois da transferencia, quem enviou e quem recebeu devem anexar o ID da transacao e a foto do comprovante para revisao.',
+            'message' => 'Copie o código Pix do destinatário. Depois da transferência, quem enviou e quem recebeu devem anexar o ID da transação e a foto do comprovante para revisão.',
         ];
     }
 
@@ -902,10 +997,18 @@ class NexoraController extends Controller
             ->join('users as requester', 'requester.id', '=', 'support_requests.requester_id')
             ->select(
                 'contributions.*',
+                'support_requests.id as request_id',
                 'support_requests.public_code as request_public_code',
                 'support_requests.requester_id as requester_id',
+                'support_requests.amount_cents as request_amount_cents',
+                'support_requests.funded_cents as request_funded_cents',
+                'support_requests.status as request_status',
                 'donor.public_id as donor_public_id',
+                'donor.name as donor_name',
+                'donor.email as donor_email',
                 'requester.public_id as requester_public_id',
+                'requester.name as requester_name',
+                'requester.email as requester_email',
             );
     }
 
@@ -934,9 +1037,17 @@ class NexoraController extends Controller
     {
         return [
             'id' => $row->id,
+            'requestId' => $row->request_id,
             'requestPublicCode' => $row->request_public_code,
+            'requestAmountCents' => (int) $row->request_amount_cents,
+            'requestFundedCents' => (int) $row->request_funded_cents,
+            'requestStatus' => $row->request_status,
             'donorPublicId' => $row->donor_public_id,
+            'donorName' => $row->donor_name,
+            'donorEmail' => $row->donor_email,
             'receiverPublicId' => $row->requester_public_id,
+            'receiverName' => $row->requester_name,
+            'receiverEmail' => $row->requester_email,
             'amountCents' => (int) $row->amount_cents,
             'status' => $row->status,
             'createdAt' => (int) $row->created_at_ms,
@@ -944,16 +1055,47 @@ class NexoraController extends Controller
             'transactionId' => $row->transaction_id,
             'senderReceiptHash' => $row->sender_receipt_hash,
             'senderReceiptDate' => $row->sender_receipt_date,
+            'senderReceiptSubmittedAt' => $row->sender_receipt_submitted_at === null ? null : (int) $row->sender_receipt_submitted_at,
             'senderReceiptImageBase64' => $row->sender_receipt_image_base64,
             'senderReceiptMimeType' => $row->sender_receipt_mime_type,
             'receiverReceiptHash' => $row->receiver_receipt_hash,
             'receiverReceiptDate' => $row->receiver_receipt_date,
+            'receiverReceiptSubmittedAt' => $row->receiver_receipt_submitted_at === null ? null : (int) $row->receiver_receipt_submitted_at,
             'receiverReceiptImageBase64' => $row->receiver_receipt_image_base64,
             'receiverReceiptMimeType' => $row->receiver_receipt_mime_type,
             'hasSenderReceipt' => $this->hasSenderReceipt($row),
             'hasReceiverReceipt' => $this->hasReceiverReceipt($row),
             'evidenceComplete' => $this->evidenceComplete($row),
         ];
+    }
+
+    private function applyDateFilter($query, string $column, Request $request): void
+    {
+        $from = $this->dateBoundaryMs($request->query('from'), false);
+        if ($from !== null) {
+            $query->where($column, '>=', $from);
+        }
+        $to = $this->dateBoundaryMs($request->query('to'), true);
+        if ($to !== null) {
+            $query->where($column, '<=', $to);
+        }
+    }
+
+    private function dateBoundaryMs(mixed $value, bool $endOfDay): ?int
+    {
+        $text = trim((string) $value);
+        if ($text === '') {
+            return null;
+        }
+        try {
+            $date = \Carbon\Carbon::parse($text, 'America/Sao_Paulo');
+            if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $text)) {
+                $date = $endOfDay ? $date->endOfDay() : $date->startOfDay();
+            }
+            return $date->getTimestampMs();
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     private function dashboardStats(): array
@@ -1047,10 +1189,10 @@ class NexoraController extends Controller
             throw new ApiException(400, 'Foto do comprovante invalida.');
         }
         if (strlen($bytes) === 0 || strlen($bytes) > 2500000) {
-            throw new ApiException(400, 'Foto do comprovante deve ter ate 2,5 MB.');
+            throw new ApiException(400, 'Foto do comprovante deve ter até 2,5 MB.');
         }
         if (hash('sha256', $bytes) !== strtolower($expectedSha256)) {
-            throw new ApiException(400, 'Hash da foto nao confere com o comprovante enviado.');
+            throw new ApiException(400, 'Hash da foto não confere com o comprovante enviado.');
         }
         return $cleanBase64;
     }
@@ -1118,7 +1260,7 @@ class NexoraController extends Controller
                 return $code;
             }
         }
-        throw new ApiException(500, 'Nao foi possivel gerar identificador unico.');
+        throw new ApiException(500, 'Não foi possível gerar identificador único.');
     }
 
     private function audit(?string $actorUserId, string $action, string $target): void
@@ -1202,8 +1344,8 @@ class NexoraController extends Controller
         }
 
         try {
-            Mail::raw("Ola, {$name}.\n\nSeu codigo de verificacao Nexora e: {$code}\n\nO codigo expira em 30 minutos.", function ($message) use ($to) {
-                $message->to($to)->subject('Codigo de verificacao Nexora');
+            Mail::raw("Olá, {$name}.\n\nSeu código de verificação Nexora é: {$code}\n\nO código expira em 30 minutos.", function ($message) use ($to) {
+                $message->to($to)->subject('Código de verificação Nexora');
             });
         } catch (\Throwable $error) {
             Log::error('NEXORA MAIL ERROR: verification email failed', [
@@ -1221,8 +1363,8 @@ class NexoraController extends Controller
         }
 
         try {
-            Mail::raw("Seu codigo de recuperacao Nexora e: {$code}\n\nO codigo expira em 30 minutos.", function ($message) use ($to) {
-                $message->to($to)->subject('Recuperacao de acesso Nexora');
+            Mail::raw("Seu código de recuperação Nexora é: {$code}\n\nO código expira em 30 minutos.", function ($message) use ($to) {
+                $message->to($to)->subject('Recuperação de acesso Nexora');
             });
         } catch (\Throwable $error) {
             Log::error('NEXORA MAIL ERROR: recovery email failed', [
