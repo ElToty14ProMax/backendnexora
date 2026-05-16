@@ -102,7 +102,7 @@ NEXORA_SUPER_ADMIN_PASSWORD=bootstrap-password
 NEXORA_FOUNDER_EMAILS=admin@example.com
 ```
 
-If the Vercel Neon integration creates `DATABASE_URL`, `POSTGRES_URL`, `PGHOST`, `PGUSER`, and `PGPASSWORD`, Laravel will use those automatically. You only need to add `DB_CONNECTION=pgsql` and the Nexora application secrets.
+If the Vercel Neon integration creates `DATABASE_URL`, `POSTGRES_URL`, `PGHOST`, `PGUSER`, and `PGPASSWORD`, Laravel will use those automatically. You only need to add `DB_CONNECTION=pgsql` and the Nexora application secrets. For Neon pooled connections, keep `DB_DISABLE_PREPARES=true` and `DB_EMULATE_PREPARES=false` so PostgreSQL transactions work correctly through PgBouncer.
 
 Generate `APP_KEY` locally:
 
