@@ -411,7 +411,7 @@ class NexoraController extends Controller
             'allocatedAmountCents' => $allocated,
             'unallocatedAmountCents' => max($total - $allocated, 0),
             'instructions' => $instructions,
-            'message' => 'Pix fracionado por ordem cronologica. Use o codigo Pix da plataforma e envie os comprovantes depois da transferencia.',
+            'message' => 'Pix fracionado por ordem cronologica. Use cada codigo Pix do destinatario e envie os comprovantes depois da transferencia.',
         ], 201);
     }
 
@@ -860,20 +860,23 @@ class NexoraController extends Controller
     private function instructionResponse(object $contribution, object $support): array
     {
         $reference = $this->security->paymentReference($contribution->id);
-        $platformPixKey = trim((string) config('nexora.admin_pix_key'));
-        if ($platformPixKey === '') {
-            throw new ApiException(500, 'Pix da plataforma nao configurado. Defina NEXORA_ADMIN_PIX_KEY no servidor.');
+        $requester = $this->userById($support->requester_id);
+        if ($requester === null) {
+            throw new ApiException(404, 'Destinatario da solicitacao nao encontrado.');
         }
+        $receiverPixKey = trim($this->security->decrypt($requester->pix_cipher));
+        $receiverName = (string) $requester->name;
+
         try {
             $pixCode = PixCopyCode::build(
-                $platformPixKey,
+                $receiverPixKey,
                 (int) $contribution->amount_cents,
                 $reference,
-                (string) config('nexora.pix_merchant_name'),
+                $receiverName,
                 (string) config('nexora.pix_merchant_city'),
             );
         } catch (\InvalidArgumentException $error) {
-            throw new ApiException(500, $error->getMessage());
+            throw new ApiException(422, $error->getMessage());
         }
 
         return [
@@ -883,7 +886,7 @@ class NexoraController extends Controller
             'receiverPixKey' => '',
             'pixCopyCode' => $pixCode,
             'amountCents' => (int) $contribution->amount_cents,
-            'message' => 'Copie o codigo Pix da plataforma. Depois da transferencia, quem enviou e quem recebeu devem anexar o ID da transacao e a foto do comprovante para revisao.',
+            'message' => 'Copie o codigo Pix do destinatario. Depois da transferencia, quem enviou e quem recebeu devem anexar o ID da transacao e a foto do comprovante para revisao.',
         ];
     }
 

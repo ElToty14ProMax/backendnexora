@@ -5,7 +5,8 @@ Date: 2026-05-16
 ## What changed
 
 - The backend no longer returns an internal Nexora reference as if it were a bank Pix code.
-- `NEXORA_ADMIN_PIX_KEY` is required to generate Pix copia e cola.
+- Support contributions generate Pix copia e cola for the Pix key encrypted in the requester's user account.
+- `NEXORA_ADMIN_PIX_KEY` is only used when the platform needs to show a Pix key for administrative fees owed to Nexora. It is not used for normal user-to-user support transfers.
 - The Pix payload now follows BR Code/EMV fields:
   - `00` payload format
   - `01` point of initiation
@@ -30,7 +31,7 @@ Verified:
 - `GET /health` returns the Laravel backend marker.
 - Login by CPF `11976639247` succeeds with the configured account password.
 - A fresh support request was created and approved.
-- A donor created a contribution and received a Pix copia e cola payload.
+- A donor created a contribution and received a Pix copia e cola payload for the requester's registered Pix key.
 - The generated payload:
   - starts with `000201`
   - contains `br.gov.bcb.pix`
@@ -43,7 +44,7 @@ Verification request code: `AP-CBQ88RH`
 
 ## Important limitation
 
-The app can validate BR Code structure and CRC. A bank will only locate the Pix if the configured `NEXORA_ADMIN_PIX_KEY` is actually registered as a Pix key in the Brazilian banking system. Without a registered platform Pix key, no app can generate a payable Pix while hiding the receiver's personal key.
+The app can validate BR Code structure and CRC. A bank will only locate the Pix if the requester's registered Pix key is actually registered in the Brazilian banking system. Static Pix copia e cola cannot hash the Pix key, because the bank needs a real key or a dynamic Pix URL to resolve the receiver.
 
 ## Status flow
 

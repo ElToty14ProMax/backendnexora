@@ -85,7 +85,9 @@ Actual inbox delivery was not confirmed because the Gmail SMTP credential provid
 - Contribution instructions returned `receiverPixKey: ""`.
 - The receiver visible identifier was the public request code, not the receiver's Pix key.
 - Sender and receiver receipt uploads were both required before admin contribution confirmation.
-- `pixCopyCode` was generated without exposing the receiver Pix key. Because `NEXORA_ADMIN_PIX_KEY` is not configured in production, the API currently returns an internal payment reference instead of a bank-ready Pix copy-and-paste code. Configure the platform/admin Pix key to generate a real Pix code for bank apps while still hiding user Pix keys.
+- `pixCopyCode` is generated from the requester's registered Pix key so bank apps can pay the correct receiver.
+- `receiverPixKey` remains empty in the JSON response, so the UI does not display the receiver's Pix key as a separate visible field.
+- `NEXORA_ADMIN_PIX_KEY` is reserved for administrative/platform fees and is not used for normal support transfers between users.
 
 ## Test Data
 

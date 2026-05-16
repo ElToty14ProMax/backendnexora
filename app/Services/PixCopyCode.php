@@ -4,9 +4,9 @@ namespace App\Services;
 
 class PixCopyCode
 {
-    public static function build(string $platformPixKey, int $amountCents, string $txid, string $merchantName = 'NEXORA', string $merchantCity = 'SAO PAULO'): string
+    public static function build(string $receiverPixKey, int $amountCents, string $txid, string $merchantName = 'NEXORA', string $merchantCity = 'SAO PAULO'): string
     {
-        $pixKey = self::normalizePixKey($platformPixKey);
+        $pixKey = self::normalizePixKey($receiverPixKey);
         if ($amountCents <= 0) {
             throw new \InvalidArgumentException('Valor Pix invalido.');
         }
@@ -59,7 +59,7 @@ class PixCopyCode
             return '+'.$digits;
         }
 
-        throw new \InvalidArgumentException('Chave Pix da plataforma invalida.');
+        throw new \InvalidArgumentException('Chave Pix do destinatario invalida.');
     }
 
     private static function tag(string $id, string $value): string

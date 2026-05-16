@@ -19,7 +19,7 @@ NEXORA_ENV=dev
 NEXORA_ADMIN_TOKEN=replace-with-32-plus-random-chars
 NEXORA_DATA_KEY_B64=base64-encoded-32-byte-key
 NEXORA_CPF_PEPPER=replace-with-long-random-pepper
-NEXORA_ADMIN_PIX_KEY=your-platform-pix-key
+NEXORA_ADMIN_PIX_KEY=your-admin-fee-pix-key
 NEXORA_SUPER_ADMIN_EMAIL=admin@example.com
 NEXORA_SUPER_ADMIN_CPF=valid-founder-cpf
 NEXORA_SUPER_ADMIN_PASSWORD=local-bootstrap-password
@@ -54,7 +54,7 @@ The Laravel routes intentionally match the previous Ktor backend:
 - `/support-requests/...`
 - `/admin/...`
 
-Pix instructions return a platform Pix copy/paste code and keep receiver Pix keys private. Receipt dates are assigned by the server when evidence is submitted.
+Pix instructions generate a bank-ready copy/paste code for the requester's registered Pix key. The API does not return that key as a visible field, but the BR Code itself must contain a resolvable Pix key so bank apps can pay the correct receiver. Receipt dates are assigned by the server when evidence is submitted.
 
 ## Verification
 
@@ -94,7 +94,7 @@ NEXORA_ENV=prod
 NEXORA_ADMIN_TOKEN=replace-with-32-plus-random-chars
 NEXORA_DATA_KEY_B64=base64-encoded-32-byte-key
 NEXORA_CPF_PEPPER=replace-with-long-random-pepper
-NEXORA_ADMIN_PIX_KEY=your-platform-pix-key
+NEXORA_ADMIN_PIX_KEY=your-admin-fee-pix-key
 NEXORA_SUPER_ADMIN_EMAIL=admin@example.com
 NEXORA_SUPER_ADMIN_CPF=valid-founder-cpf
 NEXORA_SUPER_ADMIN_PASSWORD=bootstrap-password
