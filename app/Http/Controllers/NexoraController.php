@@ -860,9 +860,21 @@ class NexoraController extends Controller
     private function instructionResponse(object $contribution, object $support): array
     {
         $reference = $this->security->paymentReference($contribution->id);
-        $pixCode = config('nexora.admin_pix_key')
-            ? PixCopyCode::build((string) config('nexora.admin_pix_key'), (int) $contribution->amount_cents, $reference)
-            : $reference;
+        $platformPixKey = trim((string) config('nexora.admin_pix_key'));
+        if ($platformPixKey === '') {
+            throw new ApiException(500, 'Pix da plataforma nao configurado. Defina NEXORA_ADMIN_PIX_KEY no servidor.');
+        }
+        try {
+            $pixCode = PixCopyCode::build(
+                $platformPixKey,
+                (int) $contribution->amount_cents,
+                $reference,
+                (string) config('nexora.pix_merchant_name'),
+                (string) config('nexora.pix_merchant_city'),
+            );
+        } catch (\InvalidArgumentException $error) {
+            throw new ApiException(500, $error->getMessage());
+        }
 
         return [
             'contributionId' => $contribution->id,
@@ -871,9 +883,7 @@ class NexoraController extends Controller
             'receiverPixKey' => '',
             'pixCopyCode' => $pixCode,
             'amountCents' => (int) $contribution->amount_cents,
-            'message' => config('nexora.admin_pix_key')
-                ? 'Copie o codigo Pix da plataforma. Depois da transferencia, anexe o ID e a foto no historico.'
-                : 'Codigo interno gerado. Configure a chave Pix da plataforma para gerar um Pix copia e cola bancario.',
+            'message' => 'Copie o codigo Pix da plataforma. Depois da transferencia, quem enviou e quem recebeu devem anexar o ID da transacao e a foto do comprovante para revisao.',
         ];
     }
 
@@ -1125,8 +1135,26 @@ class NexoraController extends Controller
         }
         $existing = $this->userByEmail($email);
         if ($existing !== null) {
-            if ($existing->role !== 'SUPER_ADMIN' || $existing->status !== 'APPROVED') {
-                DB::table('users')->where('id', $existing->id)->update(['role' => 'SUPER_ADMIN', 'status' => 'APPROVED']);
+            $updates = [];
+            if ($existing->role !== 'SUPER_ADMIN') {
+                $updates['role'] = 'SUPER_ADMIN';
+            }
+            if ($existing->status !== 'APPROVED') {
+                $updates['status'] = 'APPROVED';
+            }
+            $targetCpfHash = $this->security->hashCpf($cpf);
+            if ($existing->cpf_hash !== $targetCpfHash) {
+                $taken = DB::table('users')
+                    ->where('cpf_hash', $targetCpfHash)
+                    ->where('id', '<>', $existing->id)
+                    ->exists();
+                if (! $taken) {
+                    $updates['cpf_hash'] = $targetCpfHash;
+                    $updates['cpf_cipher'] = $this->security->encrypt($cpf);
+                }
+            }
+            if ($updates !== []) {
+                DB::table('users')->where('id', $existing->id)->update($updates);
             }
             return;
         }
