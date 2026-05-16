@@ -1165,9 +1165,17 @@ class NexoraController extends Controller
             Log::info("NEXORA DEV EMAIL: verification code for {$to} is {$code}");
             return;
         }
-        Mail::raw("Ola, {$name}.\n\nSeu codigo de verificacao Nexora e: {$code}\n\nO codigo expira em 30 minutos.", function ($message) use ($to) {
-            $message->to($to)->subject('Codigo de verificacao Nexora');
-        });
+
+        try {
+            Mail::raw("Ola, {$name}.\n\nSeu codigo de verificacao Nexora e: {$code}\n\nO codigo expira em 30 minutos.", function ($message) use ($to) {
+                $message->to($to)->subject('Codigo de verificacao Nexora');
+            });
+        } catch (\Throwable $error) {
+            Log::error('NEXORA MAIL ERROR: verification email failed', [
+                'to_hash' => hash('sha256', $this->security->normalizeEmail($to)),
+                'message' => $error->getMessage(),
+            ]);
+        }
     }
 
     private function sendRecoveryCode(string $to, string $code): void
@@ -1176,9 +1184,17 @@ class NexoraController extends Controller
             Log::info("NEXORA DEV EMAIL: recovery code for {$to} is {$code}");
             return;
         }
-        Mail::raw("Seu codigo de recuperacao Nexora e: {$code}\n\nO codigo expira em 30 minutos.", function ($message) use ($to) {
-            $message->to($to)->subject('Recuperacao de acesso Nexora');
-        });
+
+        try {
+            Mail::raw("Seu codigo de recuperacao Nexora e: {$code}\n\nO codigo expira em 30 minutos.", function ($message) use ($to) {
+                $message->to($to)->subject('Recuperacao de acesso Nexora');
+            });
+        } catch (\Throwable $error) {
+            Log::error('NEXORA MAIL ERROR: recovery email failed', [
+                'to_hash' => hash('sha256', $this->security->normalizeEmail($to)),
+                'message' => $error->getMessage(),
+            ]);
+        }
     }
 
     private function mailConfigured(): bool
