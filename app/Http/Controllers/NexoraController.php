@@ -445,7 +445,39 @@ class NexoraController extends Controller
             throw new ApiException(400, 'Hash do comprovante invalido.');
         }
         $imageBase64 = $this->validateReceiptImage((string) $request->input('receiptImageBase64', ''), (string) $request->input('receiptMimeType', 'image/jpeg'), $hash);
-        $transactionId = $this->normalizeTransactionId((string) $request->input('transactionId', ''));
+        
+        $mime = strtolower(trim((string) $request->input('receiptMimeType', 'image/jpeg')));
+        $receiptDate = now('America/Sao_Paulo')->format('Y-m-d');
+        $submittedAt = $this->nowMs();
+        $prefix = $side === 'SENDER' ? 'sender' : 'receiver';
+        
+        $providedTransactionId = trim((string) $request->input('transactionId', ''));
+        $transactionId = null;
+        $ocrResult = null;
+        $ocrTransactionId = null;
+        $ocrAmountCents = null;
+        $ocrConfidence = null;
+        $ocrProvider = null;
+        $ocrRawText = null;
+
+        if (!empty($providedTransactionId)) {
+            $transactionId = $this->normalizeTransactionId($providedTransactionId);
+        } else {
+            $ocrService = new \App\Services\OcrService;
+            $analyzer = new \App\Services\ReceiptAnalyzer($ocrService);
+            $cleanBase64 = str_contains($imageBase64, 'base64,') ? substr($imageBase64, strpos($imageBase64, 'base64,') + 7) : $imageBase64;
+            $ocrResult = $analyzer->analyze($cleanBase64, $mime);
+            $transactionId = $ocrResult['transactionId'] ? $this->normalizeTransactionId($ocrResult['transactionId']) : null;
+            $ocrTransactionId = $ocrResult['transactionId'];
+            $ocrAmountCents = $ocrResult['amountCents'];
+            $ocrConfidence = $ocrResult['confidence'];
+            $ocrProvider = $ocrService->getProvider();
+            $ocrRawText = $ocrResult['rawText'];
+        }
+
+        if (empty($transactionId)) {
+            throw new ApiException(400, 'ID da transação não fornecido nem detectado na imagem.');
+        }
         if (strlen($transactionId) < 6 || strlen($transactionId) > 80) {
             throw new ApiException(400, 'ID da transação inválido.');
         }
@@ -457,19 +489,26 @@ class NexoraController extends Controller
             throw new ApiException(409, 'ID de transação já cadastrado. Ele aparece apenas uma vez no histórico.');
         }
 
-        $mime = strtolower(trim((string) $request->input('receiptMimeType', 'image/jpeg')));
-        $receiptDate = now('America/Sao_Paulo')->format('Y-m-d');
-        $submittedAt = $this->nowMs();
-        $prefix = $side === 'SENDER' ? 'sender' : 'receiver';
-        DB::table('contributions')->where('id', $contribution->id)->update([
+        $updateData = [
             'transaction_id' => $transactionId,
             "{$prefix}_receipt_hash" => $hash,
             "{$prefix}_receipt_image_base64" => $imageBase64,
             "{$prefix}_receipt_mime_type" => $mime,
             "{$prefix}_receipt_date" => $receiptDate,
             "{$prefix}_receipt_submitted_at" => $submittedAt,
-        ]);
+            "{$prefix}_ocr_transaction_id" => $ocrTransactionId,
+            "{$prefix}_ocr_amount_cents" => $ocrAmountCents,
+            "{$prefix}_ocr_confidence" => $ocrConfidence,
+            "{$prefix}_ocr_provider" => $ocrProvider,
+            "{$prefix}_ocr_raw_text" => $ocrRawText,
+        ];
+
+        DB::table('contributions')->where('id', $contribution->id)->update($updateData);
+        
         $updated = $this->contributionById($contribution->id);
+        $this->updateOcrComparison($updated);
+        $updated = $this->contributionById($contribution->id);
+        
         $this->audit($user->id, "PIX_{$side}_RECEIPT_SUBMITTED", $contribution->id);
 
         return response()->json([
@@ -486,7 +525,61 @@ class NexoraController extends Controller
             'hasSenderReceipt' => $this->hasSenderReceipt($updated),
             'hasReceiverReceipt' => $this->hasReceiverReceipt($updated),
             'evidenceComplete' => $this->evidenceComplete($updated),
+            'ocrResult' => $ocrResult ? [
+                'transactionId' => $ocrTransactionId,
+                'amountCents' => $ocrAmountCents,
+                'amountFormatted' => $ocrResult['amountFormatted'] ?? null,
+                'confidence' => $ocrConfidence,
+                'provider' => $ocrProvider,
+                'date' => $ocrResult['date'] ?? null,
+                'time' => $ocrResult['time'] ?? null,
+            ] : null,
+            'ocrComparison' => $this->getOcrComparison($updated),
         ], 201);
+    }
+
+    private function updateOcrComparison(object $contribution): void
+    {
+        $senderOcrId = $contribution->sender_ocr_transaction_id;
+        $receiverOcrId = $contribution->receiver_ocr_transaction_id;
+        
+        if (empty($senderOcrId) || empty($receiverOcrId)) {
+            return;
+        }
+        
+        $normalizedSender = $this->normalizeTransactionId($senderOcrId);
+        $normalizedReceiver = $this->normalizeTransactionId($receiverOcrId);
+        
+        $result = 'MATCH';
+        $notes = null;
+        
+        if ($normalizedSender !== $normalizedReceiver) {
+            $result = 'NO_MATCH';
+            $notes = "Transaction ID do remetente ({$senderOcrId}) diferente do destinatário ({$receiverOcrId})";
+        }
+        
+        DB::table('contributions')->where('id', $contribution->id)->update([
+            'ocr_comparison_result' => $result,
+            'ocr_comparison_notes' => $notes,
+        ]);
+    }
+
+    private function getOcrComparison(object $contribution): ?array
+    {
+        if (empty($contribution->sender_ocr_transaction_id) && empty($contribution->receiver_ocr_transaction_id)) {
+            return null;
+        }
+        
+        return [
+            'senderTransactionId' => $contribution->sender_ocr_transaction_id,
+            'receiverTransactionId' => $contribution->receiver_ocr_transaction_id,
+            'result' => $contribution->ocr_comparison_result,
+            'notes' => $contribution->ocr_comparison_notes,
+            'senderConfidence' => $contribution->sender_ocr_confidence,
+            'receiverConfidence' => $contribution->receiver_ocr_confidence,
+            'senderProvider' => $contribution->sender_ocr_provider,
+            'receiverProvider' => $contribution->receiver_ocr_provider,
+        ];
     }
 
     public function analyzeReceipt(Request $request): JsonResponse
