@@ -489,6 +489,43 @@ class NexoraController extends Controller
         ], 201);
     }
 
+    public function analyzeReceipt(Request $request): JsonResponse
+    {
+        $imageBase64 = trim((string) $request->input('imageBase64', ''));
+        $cleanBase64 = trim(str_contains($imageBase64, 'base64,') ? substr($imageBase64, strpos($imageBase64, 'base64,') + 7) : $imageBase64);
+        $mimeType = trim((string) $request->input('mimeType', 'image/jpeg'));
+
+        if ($cleanBase64 === '') {
+            throw new ApiException(400, 'Imagem ausente.');
+        }
+        $bytes = base64_decode($cleanBase64, true);
+        if ($bytes === false || strlen($bytes) === 0 || strlen($bytes) > 2500000) {
+            throw new ApiException(400, 'Imagem inválida ou muito grande (máx. 2,5 MB).');
+        }
+
+        if (! in_array(strtolower($mimeType), ['image/jpeg', 'image/png', 'image/webp'], true)) {
+            throw new ApiException(400, 'Formato deve ser JPG, PNG ou WebP.');
+        }
+
+        $ocrService = new \App\Services\OcrService;
+        $analyzer = new \App\Services\ReceiptAnalyzer($ocrService);
+        $result = $analyzer->analyze($cleanBase64, $mimeType);
+
+        return response()->json([
+            'ok' => true,
+            'transactionId' => $result['transactionId'],
+            'amountCents' => $result['amountCents'],
+            'amountFormatted' => $result['amountFormatted'],
+            'date' => $result['date'],
+            'time' => $result['time'],
+            'sender' => $result['sender'],
+            'receiver' => $result['receiver'],
+            'confidence' => $result['confidence'],
+            'rawText' => $result['rawText'],
+            'provider' => $ocrService->getProvider(),
+        ]);
+    }
+
     public function adminOverview(Request $request): JsonResponse
     {
         $this->requireAdmin($request);

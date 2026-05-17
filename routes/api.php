@@ -27,6 +27,8 @@ Route::prefix('support-requests')->group(function () {
     Route::post('/contributions/{id}/receipt', [NexoraController::class, 'submitReceipt']);
 });
 
+Route::post('/receipts/analyze', [NexoraController::class, 'analyzeReceipt']);
+
 Route::prefix('admin')->group(function () {
     Route::get('/overview', [NexoraController::class, 'adminOverview']);
     Route::get('/audit-logs', [NexoraController::class, 'auditLogs']);
