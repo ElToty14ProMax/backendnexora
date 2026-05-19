@@ -15,4 +15,6 @@ return [
         fn (string $email) => strtolower(trim($email)),
         explode(',', env('NEXORA_FOUNDER_EMAILS', env('NEXORA_SUPER_ADMIN_EMAIL', 'admin@nexora.local')))
     ))),
+    'receita_api_provider' => env('NEXORA_RECEITA_API_PROVIDER', 'infosimples'),
+    'receita_api_token' => env('NEXORA_RECEITA_API_TOKEN'),
 ];

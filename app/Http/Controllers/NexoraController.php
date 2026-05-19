@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Exceptions\ApiException;
 use App\Services\CpfValidator;
 use App\Services\PixCopyCode;
+use App\Services\ReceitaFederalService;
 use App\Services\ReputationRules;
 use App\Services\RoadmapRules;
 use App\Services\SecurityService;
@@ -17,7 +18,10 @@ use Illuminate\Support\Str;
 
 class NexoraController extends Controller
 {
-    public function __construct(private readonly SecurityService $security)
+    public function __construct(
+        private readonly SecurityService $security,
+        private readonly ReceitaFederalService $receita
+    )
     {
         try {
             $this->ensureBootstrapSuperAdmin();
@@ -36,6 +40,7 @@ class NexoraController extends Controller
         $email = $this->security->normalizeEmail((string) $request->input('email', ''));
         $name = trim((string) $request->input('name', ''));
         $cpf = CpfValidator::digits((string) $request->input('cpf', ''));
+        $birthdate = trim((string) $request->input('birthdate', ''));
         $pixKey = trim((string) $request->input('pixKey', ''));
         $password = (string) $request->input('password', '');
 
@@ -45,6 +50,50 @@ class NexoraController extends Controller
         if (! $this->security->isValidEmail($email)) {
             throw new ApiException(400, 'Informe um e-mail valido.');
         }
+        if ($birthdate === '') {
+            throw new ApiException(400, 'Informe a data de nascimento.');
+        }
+        $birthDateObj = \DateTime::createFromFormat('Y-m-d', $birthdate);
+        if ($birthDateObj === false || $birthDateObj->format('Y-m-d') !== $birthdate) {
+            throw new ApiException(400, 'Data de nascimento invalida.');
+        }
+        $minAgeDate = (new \DateTime())->modify('-13 years')->format('Y-m-d');
+        if ($birthdate > $minAgeDate) {
+            throw new ApiException(400, 'Precisa ter pelo menos 13 anos para se cadastrar.');
+        }
+        $maxAgeDate = (new \DateTime())->modify('-120 years')->format('Y-m-d');
+        if ($birthdate < $maxAgeDate) {
+            throw new ApiException(400, 'Data de nascimento invalida.');
+        }
+
+        if ($this->receita->isConfigured()) {
+            $rfData = $this->receita->validateCpf($cpf, $birthdate);
+            if ($rfData === null) {
+                throw new ApiException(400, 'Não foi possível validar o CPF com a Receita Federal. Tente novamente mais tarde.');
+            }
+            if (isset($rfData['situacao'])) {
+                $situacao = strtolower($rfData['situacao']);
+                if (! in_array($situacao, ['regular', 'ativa', 'ativa irregular', 'ativo'], true)) {
+                    if (str_contains($situacao, 'falecido') || str_contains($situacao, 'óbito')) {
+                        throw new ApiException(400, 'CPF pertence a pessoa falecida.');
+                    }
+                    if (str_contains($situacao, 'suspensa') || str_contains($situacao, 'suspenso')) {
+                        throw new ApiException(400, 'CPF está com situação suspensa na Receita Federal.');
+                    }
+                    if (str_contains($situacao, 'cancelada') || str_contains($situacao, 'nula')) {
+                        throw new ApiException(400, 'CPF está cancelado ou nulo na Receita Federal.');
+                    }
+                    throw new ApiException(400, "CPF com situação irregular na Receita Federal: {$rfData['situacao']}");
+                }
+            }
+            if (isset($rfData['nascimento'])) {
+                $rfBirth = $this->parseDateFromRf($rfData['nascimento']);
+                if ($rfBirth !== null && $rfBirth !== $birthdate) {
+                    throw new ApiException(400, 'Data de nascimento nãoconfere com a Receita Federal.');
+                }
+            }
+        }
+
         if (! CpfValidator::isValid($cpf)) {
             throw new ApiException(400, 'CPF invalido.');
         }
@@ -99,6 +148,7 @@ class NexoraController extends Controller
             'verification_expires_at' => $now + 30 * 60 * 1000,
             'cpf_hash' => $this->security->hashCpf($cpf),
             'cpf_cipher' => $this->security->encrypt($cpf),
+            'birthdate' => $birthdate,
             'pix_cipher' => $this->security->encrypt($pixKey),
             'password_hash' => $this->security->hashPassword($password),
             'status' => $status,
@@ -303,8 +353,8 @@ class NexoraController extends Controller
         if ($amountCents <= 0) {
             throw new ApiException(400, 'Informe um valor valido.');
         }
-        if ($dueDays < 1 || $dueDays > 90) {
-            throw new ApiException(400, 'Prazo precisa ficar entre 1 e 90 dias.');
+        if ($dueDays < 1 || $dueDays > 30) {
+            throw new ApiException(400, 'Prazo precisa ficar entre 1 e 30 dias.');
         }
         if ($amountCents > ReputationRules::supportLimitCents((int) $user->level)) {
             throw new ApiException(400, 'Valor acima do seu limite atual.');
@@ -1344,10 +1394,10 @@ class NexoraController extends Controller
             'contributionId' => $contribution->id,
             'requestPublicCode' => $support->public_code,
             'receiverIdentifier' => $support->public_code,
-            'receiverPixKey' => '',
-            'pixCopyCode' => $pixCode,
+            'receiverPixKey' => $receiverPixKey,
+            'pixCopyCode' => '',
             'amountCents' => (int) $contribution->amount_cents,
-            'message' => 'Copie o código Pix do destinatário. Depois da transferência, quem enviou e quem recebeu devem anexar o ID da transação e a foto do comprovante para revisão.',
+            'message' => 'Use a chave Pix do recebedor para fazer a transferência. Depois da transferência, quem enviou e quem recebeu devem anexar o ID da transação e a foto do comprovante para revisão.',
         ];
     }
 
@@ -1772,5 +1822,21 @@ class NexoraController extends Controller
     private function nowMs(): int
     {
         return (int) floor(microtime(true) * 1000);
+    }
+
+    private function parseDateFromRf(?string $date): ?string
+    {
+        if (empty($date)) {
+            return null;
+        }
+        $clean = trim($date);
+        $formats = ['d/m/Y', 'Y-m-d', 'dmY', 'Ymd'];
+        foreach ($formats as $format) {
+            $dt = \DateTime::createFromFormat($format, $clean);
+            if ($dt !== false) {
+                return $dt->format('Y-m-d');
+            }
+        }
+        return null;
     }
 }
