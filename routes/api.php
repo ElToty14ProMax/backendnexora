@@ -35,6 +35,7 @@ Route::prefix('admin')->group(function () {
     Route::get('/users', [NexoraController::class, 'adminUsers']);
     Route::post('/users/{id}/approve', [NexoraController::class, 'adminApproveUser']);
     Route::post('/users/{id}/block', [NexoraController::class, 'adminBlockUser']);
+    Route::post('/users/{id}/unblock', [NexoraController::class, 'adminUnblockUser']);
     Route::post('/users/{id}/confirm-admin-fee', [NexoraController::class, 'adminConfirmFee']);
     Route::post('/users/{id}/role', [NexoraController::class, 'adminUpdateRole']);
     Route::post('/users/{id}/reputation', [NexoraController::class, 'adminUpdateReputation']);
@@ -45,4 +46,9 @@ Route::prefix('admin')->group(function () {
     Route::post('/support-requests/{id}/confirm-return', [NexoraController::class, 'adminConfirmReturn']);
     Route::get('/contributions', [NexoraController::class, 'adminContributions']);
     Route::post('/contributions/{id}/confirm', [NexoraController::class, 'adminConfirmContribution']);
+    Route::post('/contributions/{id}/reject', [NexoraController::class, 'adminRejectContribution']);
+    Route::post('/contributions/{id}/deactivate', [NexoraController::class, 'adminDeactivateContribution']);
+    Route::post('/contributions/{id}/activate', [NexoraController::class, 'adminActivateContribution']);
 });
+
+Route::post('/system/check-expired', [NexoraController::class, 'checkExpiredContributions']);

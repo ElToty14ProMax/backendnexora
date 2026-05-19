@@ -273,7 +273,7 @@ class NexoraController extends Controller
     public function myContributions(Request $request): JsonResponse
     {
         $user = $this->requireUser($request);
-        return response()->json($this->contributionHistoryQuery()
+        $contributions = $this->contributionHistoryQuery()
             ->where(function ($query) use ($user) {
                 $query->where('contributions.donor_id', $user->id)
                     ->orWhere('support_requests.requester_id', $user->id);
@@ -281,8 +281,12 @@ class NexoraController extends Controller
             ->orderBy('contributions.created_at_ms')
             ->orderBy('contributions.id')
             ->get()
-            ->map(fn ($row) => $this->historyResponse($row, $user->id))
-            ->values());
+            ->map(function ($row) use ($user) {
+                $this->checkAndExpireContribution($row);
+                return $this->historyResponse($row, $user->id);
+            })
+            ->values();
+        return response()->json($contributions);
     }
 
     public function createSupportRequest(Request $request): JsonResponse
@@ -709,6 +713,18 @@ class NexoraController extends Controller
         return $this->ok('Usuário bloqueado.');
     }
 
+    public function adminUnblockUser(Request $request, string $id): JsonResponse
+    {
+        $actor = $this->requireAdmin($request);
+        $user = $this->userById($id);
+        if ($user === null) {
+            throw new ApiException(404, 'Usuário não encontrado.');
+        }
+        DB::table('users')->where('id', $id)->update(['status' => 'APPROVED']);
+        $this->audit($actor?->id, 'USER_STATUS_UNBLOCKED', $id);
+        return $this->ok('Usuário desbloqueado.');
+    }
+
     public function adminConfirmFee(Request $request, string $id): JsonResponse
     {
         $actor = $this->requireAdmin($request);
@@ -947,6 +963,222 @@ class NexoraController extends Controller
         return $this->ok('Apoio validado.');
     }
 
+    public function adminDeactivateContribution(Request $request, string $id): JsonResponse
+    {
+        $actor = $this->requireAdmin($request);
+        $contribution = $this->contributionById($id);
+        if ($contribution === null) {
+            throw new ApiException(404, 'Apoio não encontrado.');
+        }
+        if (in_array($contribution->status, ['CONFIRMED', 'RETURNED'], true)) {
+            throw new ApiException(409, 'Não é possível desativar um apoio já confirmado ou retornado.');
+        }
+        DB::table('contributions')->where('id', $id)->update(['status' => 'CANCELLED']);
+        $this->audit($actor?->id, 'CONTRIBUTION_DEACTIVATED', $id);
+        return $this->ok('Apoio desativado.');
+    }
+
+    public function adminActivateContribution(Request $request, string $id): JsonResponse
+    {
+        $actor = $this->requireAdmin($request);
+        $contribution = $this->contributionById($id);
+        if ($contribution === null) {
+            throw new ApiException(404, 'Apoio não encontrado.');
+        }
+        if ($contribution->status !== 'CANCELLED') {
+            throw new ApiException(409, 'Apenas apoios cancelados podem ser reativados.');
+        }
+        $support = $this->supportById($contribution->request_id);
+        if ($support === null || ! in_array($support->status, ['OPEN', 'FUNDED'], true)) {
+            throw new ApiException(409, 'A solicitação vinculada não está ativa.');
+        }
+        DB::table('contributions')->where('id', $id)->update(['status' => 'PENDING_ADMIN']);
+        $this->audit($actor?->id, 'CONTRIBUTION_ACTIVATED', $id);
+        return $this->ok('Apoio reativado.');
+    }
+
+    public function checkExpiredContributions(): JsonResponse
+    {
+        $twentyFourHoursAgo = $this->nowMs() - (24 * 60 * 60 * 1000);
+        $expiredContributions = DB::table('contributions')
+            ->whereIn('status', ['PENDING_ADMIN'])
+            ->where('created_at_ms', '<', $twentyFourHoursAgo)
+            ->where(function ($query) {
+                $query->whereNull('sender_receipt_hash')
+                    ->orWhereNull('receiver_receipt_hash')
+                    ->orWhereNull('transaction_id');
+            })
+            ->get();
+
+        $count = 0;
+        foreach ($expiredContributions as $contribution) {
+            DB::table('contributions')->where('id', $contribution->id)->update(['status' => 'EXPIRED']);
+            $this->audit(null, 'CONTRIBUTION_EXPIRED', $contribution->id);
+            $count++;
+        }
+
+        return response()->json([
+            'ok' => true,
+            'message' => "{$count} contribuições expiradas.",
+            'expiredCount' => $count,
+        ]);
+    }
+
+    private function checkAndExpireContribution(object $contribution): bool
+    {
+        if (in_array($contribution->status, ['CONFIRMED', 'RETURNED', 'CANCELLED', 'EXPIRED'], true)) {
+            return false;
+        }
+        $twentyFourHoursAgo = $this->nowMs() - (24 * 60 * 60 * 1000);
+        if ($contribution->created_at_ms < $twentyFourHoursAgo) {
+            $hasReceipts = ! empty($contribution->sender_receipt_hash) && 
+                           ! empty($contribution->receiver_receipt_hash) && 
+                           ! empty($contribution->transaction_id);
+            if (! $hasReceipts) {
+                DB::table('contributions')->where('id', $contribution->id)->update(['status' => 'EXPIRED']);
+                $this->sendExpirationNotification($contribution);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function sendExpirationNotification(object $contribution): void
+    {
+        $support = $this->supportById($contribution->request_id);
+        if ($support === null) {
+            return;
+        }
+        $donor = $this->userById($contribution->donor_id);
+        $requester = $this->userById($support->requester_id);
+        if ($donor !== null) {
+            $this->sendContributionExpirationEmail($donor->email, $donor->name, $contribution->id, $support->public_code);
+        }
+        if ($requester !== null) {
+            $this->sendContributionExpirationEmail($requester->email, $requester->name, $contribution->id, $support->public_code);
+        }
+    }
+
+    private function sendContributionExpirationEmail(string $to, string $name, string $contributionId, string $requestCode): void
+    {
+        if (! $this->mailConfigured()) {
+            Log::info("NEXORA DEV EMAIL: expiration notification for {$to} - contribution {$contributionId}");
+            return;
+        }
+        try {
+            Mail::raw("Olá, {$name}.\n\nSua transação {$contributionId} na solicitação {$requestCode} expirou porque os comprovantes não foram enviados dentro de 24 horas.\n\nVocê pode tentar novamente quando uma nova solicitação estiver ativa.\n\nEquipe Nexora", function ($message) use ($to) {
+                $message->to($to)->subject('Transação expirada - Nexora');
+            });
+        } catch (\Throwable $error) {
+            Log::error('NEXORA MAIL ERROR: expiration email failed', [
+                'to_hash' => hash('sha256', $this->security->normalizeEmail($to)),
+                'message' => $error->getMessage(),
+            ]);
+        }
+    }
+
+    private function sendIncompleteVerificationEmail(object $contribution): void
+    {
+        $support = $this->supportById($contribution->request_id);
+        if ($support === null) {
+            return;
+        }
+        $donor = $this->userById($contribution->donor_id);
+        $requester = $this->userById($support->requester_id);
+        $missingSender = empty($contribution->sender_receipt_hash);
+        $missingReceiver = empty($contribution->receiver_receipt_hash);
+        $missingTransaction = empty($contribution->transaction_id);
+        $message = "";
+        if ($missingSender) {
+            $message .= "- Falta o comprovante de envio\n";
+        }
+        if ($missingReceiver) {
+            $message .= "- Falta o comprovante de recebimento\n";
+        }
+        if ($missingTransaction) {
+            $message .= "- Falta o ID da transação\n";
+        }
+        if ($donor !== null && ($missingSender || $missingTransaction)) {
+            $this->sendIncompleteNotificationEmail($donor->email, $donor->name, $contribution->id, $support->public_code, $message);
+        }
+        if ($requester !== null && ($missingReceiver || $missingTransaction)) {
+            $this->sendIncompleteNotificationEmail($requester->email, $requester->name, $contribution->id, $support->public_code, $message);
+        }
+    }
+
+    private function sendIncompleteNotificationEmail(string $to, string $name, string $contributionId, string $requestCode, string $missingItems): void
+    {
+        if (! $this->mailConfigured()) {
+            Log::info("NEXORA DEV EMAIL: incomplete verification notification for {$to} - contribution {$contributionId}");
+            return;
+        }
+        try {
+            Mail::raw("Olá, {$name}.\n\nNão foi possível validar a transação {$contributionId} na solicitação {$requestCode} porque:\n\n{$missingItems}\nPor favor, envie os comprovantes pendientes para que a transação possa ser validada.\n\nEquipe Nexora", function ($message) use ($to) {
+                $message->to($to)->subject('Comprovantes pendentes - Nexora');
+            });
+        } catch (\Throwable $error) {
+            Log::error('NEXORA MAIL ERROR: incomplete notification email failed', [
+                'to_hash' => hash('sha256', $this->security->normalizeEmail($to)),
+                'message' => $error->getMessage(),
+            ]);
+        }
+    }
+
+    public function adminRejectContribution(Request $request, string $id): JsonResponse
+    {
+        $actor = $this->requireAdmin($request);
+        $contribution = $this->contributionById($id);
+        if ($contribution === null) {
+            throw new ApiException(404, 'Apoio não encontrado.');
+        }
+        if (! in_array($contribution->status, ['PENDING_ADMIN', 'CONFIRMED'], true)) {
+            throw new ApiException(409, 'Apoio não pode ser recusado no estado atual.');
+        }
+        $reason = Str::limit(trim((string) $request->input('reason', '')), 280, '');
+        $previousStatus = $contribution->status;
+        DB::table('contributions')->where('id', $id)->update([
+            'status' => 'CANCELLED',
+            'rejected_reason' => $reason,
+        ]);
+        $this->audit($actor?->id, 'CONTRIBUTION_REJECTED', $id);
+        $this->sendContributionRejectionEmail($contribution, $reason);
+        return $this->ok('Apoio recusado.');
+    }
+
+    private function sendContributionRejectionEmail(object $contribution, string $reason): void
+    {
+        $support = $this->supportById($contribution->request_id);
+        if ($support === null) {
+            return;
+        }
+        $donor = $this->userById($contribution->donor_id);
+        $requester = $this->userById($support->requester_id);
+        if ($donor !== null) {
+            $this->sendRejectionEmail($donor->email, $donor->name, $contribution->id, $support->public_code, $reason);
+        }
+        if ($requester !== null && $contribution->donor_id !== $support->requester_id) {
+            $this->sendRejectionEmail($requester->email, $requester->name, $contribution->id, $support->public_code, $reason);
+        }
+    }
+
+    private function sendRejectionEmail(string $to, string $name, string $contributionId, string $requestCode, string $reason): void
+    {
+        if (! $this->mailConfigured()) {
+            Log::info("NEXORA DEV EMAIL: rejection notification for {$to} - contribution {$contributionId}");
+            return;
+        }
+        try {
+            Mail::raw("Olá, {$name}.\n\nSua transação {$contributionId} na solicitação {$requestCode} foi recusada pelo administrador.\n\nMotivo: {$reason}\n\nVocê pode tentar novamente quando uma nova solicitação estiver ativa.\n\nEquipe Nexora", function ($message) use ($to) {
+                $message->to($to)->subject('Transação recusada - Nexora');
+            });
+        } catch (\Throwable $error) {
+            Log::error('NEXORA MAIL ERROR: rejection email failed', [
+                'to_hash' => hash('sha256', $this->security->normalizeEmail($to)),
+                'message' => $error->getMessage(),
+            ]);
+        }
+    }
+
     private function requireUser(Request $request): object
     {
         $auth = $request->header('Authorization');
@@ -1165,6 +1397,8 @@ class NexoraController extends Controller
 
     private function adminContributionResponse(object $row): array
     {
+        $this->checkAndExpireContribution($row);
+        $row = $this->contributionById($row->id);
         return [
             'id' => $row->id,
             'requestId' => $row->request_id,
@@ -1196,6 +1430,18 @@ class NexoraController extends Controller
             'hasSenderReceipt' => $this->hasSenderReceipt($row),
             'hasReceiverReceipt' => $this->hasReceiverReceipt($row),
             'evidenceComplete' => $this->evidenceComplete($row),
+            'senderOcrTransactionId' => $row->sender_ocr_transaction_id,
+            'senderOcrAmountCents' => $row->sender_ocr_amount_cents,
+            'senderOcrConfidence' => $row->sender_ocr_confidence,
+            'senderOcrProvider' => $row->sender_ocr_provider,
+            'senderOcrRawText' => $row->sender_ocr_raw_text,
+            'receiverOcrTransactionId' => $row->receiver_ocr_transaction_id,
+            'receiverOcrAmountCents' => $row->receiver_ocr_amount_cents,
+            'receiverOcrConfidence' => $row->receiver_ocr_confidence,
+            'receiverOcrProvider' => $row->receiver_ocr_provider,
+            'receiverOcrRawText' => $row->receiver_ocr_raw_text,
+            'ocrComparisonResult' => $row->ocr_comparison_result,
+            'ocrComparisonNotes' => $row->ocr_comparison_notes,
         ];
     }
 
