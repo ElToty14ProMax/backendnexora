@@ -937,6 +937,7 @@ class NexoraController extends Controller
     {
         $this->requireAdmin($request);
         $query = $this->contributionHistoryQuery();
+        Log::info('NEXORA adminContributions: query built, fetching...');
 
         $search = trim((string) $request->query('search', ''));
         if ($search !== '') {
@@ -974,10 +975,14 @@ class NexoraController extends Controller
             });
         }
         $this->applyDateFilter($query, 'contributions.created_at_ms', $request);
+        Log::info('NEXORA adminContributions: executing query...');
 
-        return response()->json($query
+        $rows = $query
             ->orderByDesc('contributions.created_at_ms')
-            ->get()
+            ->get();
+        Log::info('NEXORA adminContributions: got ' . count($rows) . ' rows, mapping...');
+
+        return response()->json($rows
             ->map(fn ($row) => $this->adminContributionResponse($row))
             ->values());
     }
