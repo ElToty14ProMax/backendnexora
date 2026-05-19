@@ -534,12 +534,27 @@ class NexoraController extends Controller
             $analyzer = new ReceiptAnalyzer($ocrService);
             $cleanBase64 = str_contains($imageBase64, 'base64,') ? substr($imageBase64, strpos($imageBase64, 'base64,') + 7) : $imageBase64;
             $ocrResult = $analyzer->analyze($cleanBase64, $mime);
-            $transactionId = $ocrResult['transactionId'] ? $this->normalizeTransactionId($ocrResult['transactionId']) : null;
-            $ocrTransactionId = $ocrResult['transactionId'];
-            $ocrAmountCents = $ocrResult['amountCents'];
-            $ocrConfidence = $ocrResult['confidence'];
-            $ocrProvider = $ocrService->getProvider();
-            $ocrRawText = $ocrResult['rawText'];
+
+            $rawText = $ocrResult['rawText'] ?? '';
+            $hasPixKeywords = stripos($rawText, 'PIX') !== false || stripos($rawText, 'Pix') !== false || stripos($rawText, 'transferência') !== false || stripos($rawText, 'transferencia') !== false;
+            $confidence = $ocrResult['confidence'] ?? 'baixa';
+            $isHighConfidence = in_array($confidence, ['alta', 'media'], true);
+
+            if ($ocrResult['transactionId'] && ($isHighConfidence || $hasPixKeywords)) {
+                $transactionId = $this->normalizeTransactionId($ocrResult['transactionId']);
+                $ocrTransactionId = $ocrResult['transactionId'];
+                $ocrAmountCents = $ocrResult['amountCents'];
+                $ocrConfidence = $confidence;
+                $ocrProvider = $ocrService->getProvider();
+                $ocrRawText = $rawText;
+            } else {
+                $transactionId = null;
+                $ocrTransactionId = null;
+                $ocrAmountCents = null;
+                $ocrConfidence = 'baixa';
+                $ocrProvider = $ocrService->getProvider();
+                $ocrRawText = $rawText;
+            }
         }
 
         if (empty($transactionId)) {
