@@ -10,30 +10,96 @@ class ReceiptAnalyzer
     {
         $rawText = $this->ocr->extractText($imageBase64, $mimeType);
 
+        $transactionId = $this->extractTransactionId($rawText);
+        $amountCents = $this->extractAmountCents($rawText);
+        $errors = $this->validationErrors($rawText, $transactionId, $amountCents);
+
         return [
             'rawText' => $rawText,
-            'transactionId' => $this->extractTransactionId($rawText),
-            'amountCents' => $this->extractAmountCents($rawText),
+            'transactionId' => $transactionId,
+            'amountCents' => $amountCents,
             'amountFormatted' => $this->extractAmountFormatted($rawText),
             'date' => $this->extractDate($rawText),
             'time' => $this->extractTime($rawText),
             'sender' => $this->extractSender($rawText),
             'receiver' => $this->extractReceiver($rawText),
             'confidence' => $this->calculateConfidence($rawText),
+            'isPixReceipt' => count($errors) === 0,
+            'validationErrors' => $errors,
         ];
+    }
+
+    private function looksLikePixReceipt(string $text): bool
+    {
+        $normalized = mb_strtolower($text);
+
+        $pixSignals = [
+            'pix',
+            'comprovante',
+            'transferência',
+            'transferencia',
+            'pagamento',
+            'endtoendid',
+            'id da transação',
+            'id da transacao',
+            'valor',
+            'r$',
+            'recebedor',
+            'beneficiário',
+            'beneficiario',
+            'pagador',
+        ];
+
+        $hits = 0;
+
+        foreach ($pixSignals as $signal) {
+            if (str_contains($normalized, $signal)) {
+                $hits++;
+            }
+        }
+
+        return $hits >= 4;
+    }
+
+    private function validationErrors(string $text, ?string $transactionId, ?int $amountCents): array
+    {
+        $errors = [];
+
+        if (trim($text) === '') {
+            $errors[] = 'Não foi possível ler texto suficiente na imagem.';
+        }
+
+        if (! $this->looksLikePixReceipt($text)) {
+            $errors[] = 'A imagem não parece ser um comprovante Pix.';
+        }
+
+        if ($transactionId === null) {
+            $errors[] = 'ID da transação Pix não identificado.';
+        }
+
+        if ($amountCents === null) {
+            $errors[] = 'Valor do comprovante não identificado.';
+        }
+
+        return $errors;
     }
 
     private function extractTransactionId(string $text): ?string
     {
-        if (preg_match('/E\d{4}\d{2}\d{2}[\w\d]{10,}/', $text, $match)) {
-            return $match[0];
+        $cleanText = preg_replace('/\s+/', ' ', $text) ?? $text;
+
+        if (preg_match('/\b(E\d{8}[A-Za-z0-9]{10,40})\b/', $cleanText, $match)) {
+            return $match[1];
         }
-        if (preg_match('/EndToEnd[Ii][Dd]?[:\s]*([A-Za-z0-9\-\.\/]{10,})/', $text, $match)) {
+
+        if (preg_match('/EndToEndId[:\s]*([E][0-9]{8}[A-Za-z0-9]{10,40})/i', $cleanText, $match)) {
             return trim($match[1]);
         }
-        if (preg_match('/[Ii][Dd]\s*(?:da\s*)?[Tt]ransação[:\s]*([A-Za-z0-9\-\.\/]{8,})/', $text, $match)) {
+
+        if (preg_match('/ID\s+da\s+transa[cç][aã]o[:\s]*([E][0-9]{8}[A-Za-z0-9]{10,40})/i', $cleanText, $match)) {
             return trim($match[1]);
         }
+
         return null;
     }
 

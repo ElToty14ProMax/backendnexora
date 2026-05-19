@@ -518,7 +518,6 @@ class NexoraController extends Controller
         $submittedAt = $this->nowMs();
         $prefix = $side === 'SENDER' ? 'sender' : 'receiver';
 
-        $providedTransactionId = trim((string) $request->input('transactionId', ''));
         $transactionId = null;
         $ocrResult = null;
         $ocrTransactionId = null;
@@ -527,38 +526,33 @@ class NexoraController extends Controller
         $ocrProvider = null;
         $ocrRawText = null;
 
-        if (! empty($providedTransactionId)) {
-            $transactionId = $this->normalizeTransactionId($providedTransactionId);
-        } else {
-            $ocrService = new OcrService;
-            $analyzer = new ReceiptAnalyzer($ocrService);
-            $cleanBase64 = str_contains($imageBase64, 'base64,') ? substr($imageBase64, strpos($imageBase64, 'base64,') + 7) : $imageBase64;
-            $ocrResult = $analyzer->analyze($cleanBase64, $mime);
+        $ocrService = new OcrService;
+        $analyzer = new ReceiptAnalyzer($ocrService);
+        $cleanBase64 = str_contains($imageBase64, 'base64,') ? substr($imageBase64, strpos($imageBase64, 'base64,') + 7) : $imageBase64;
+        $ocrResult = $analyzer->analyze($cleanBase64, $mime);
 
-            $rawText = $ocrResult['rawText'] ?? '';
-            $hasPixKeywords = stripos($rawText, 'PIX') !== false || stripos($rawText, 'Pix') !== false || stripos($rawText, 'transferência') !== false || stripos($rawText, 'transferencia') !== false;
-            $confidence = $ocrResult['confidence'] ?? 'baixa';
-            $isHighConfidence = in_array($confidence, ['alta', 'media'], true);
-
-            if ($ocrResult['transactionId'] && ($isHighConfidence || $hasPixKeywords)) {
-                $transactionId = $this->normalizeTransactionId($ocrResult['transactionId']);
-                $ocrTransactionId = $ocrResult['transactionId'];
-                $ocrAmountCents = $ocrResult['amountCents'];
-                $ocrConfidence = $confidence;
-                $ocrProvider = $ocrService->getProvider();
-                $ocrRawText = $rawText;
-            } else {
-                $transactionId = null;
-                $ocrTransactionId = null;
-                $ocrAmountCents = null;
-                $ocrConfidence = 'baixa';
-                $ocrProvider = $ocrService->getProvider();
-                $ocrRawText = $rawText;
-            }
+        if (! ($ocrResult['isPixReceipt'] ?? false)) {
+            throw new ApiException(400, implode(' ', $ocrResult['validationErrors'] ?? [
+                'A imagem enviada não parece ser um comprovante Pix válido.'
+            ]));
         }
 
+        if ((int) ($ocrResult['amountCents'] ?? 0) !== (int) $contribution->amount_cents) {
+            throw new ApiException(409, 'O valor identificado no comprovante não confere com o valor deste apoio.');
+        }
+
+        $transactionId = $ocrResult['transactionId']
+            ? $this->normalizeTransactionId($ocrResult['transactionId'])
+            : null;
+
+        $ocrTransactionId = $ocrResult['transactionId'];
+        $ocrAmountCents = $ocrResult['amountCents'];
+        $ocrConfidence = $ocrResult['confidence'];
+        $ocrProvider = $ocrService->getProvider();
+        $ocrRawText = $ocrResult['rawText'] ?? '';
+
         if (empty($transactionId)) {
-            throw new ApiException(400, 'ID da transação não fornecido nem detectado na imagem.');
+            throw new ApiException(400, 'ID da transação não detectado na imagem.');
         }
         if (strlen($transactionId) < 6 || strlen($transactionId) > 80) {
             throw new ApiException(400, 'ID da transação inválido.');
@@ -755,6 +749,8 @@ class NexoraController extends Controller
             'sender' => $result['sender'],
             'receiver' => $result['receiver'],
             'confidence' => $result['confidence'],
+            'isPixReceipt' => $result['isPixReceipt'],
+            'validationErrors' => $result['validationErrors'],
             'rawText' => $result['rawText'],
             'provider' => $ocrService->getProvider(),
         ]);

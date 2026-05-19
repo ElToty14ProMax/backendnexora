@@ -23,7 +23,7 @@ class OcrService
 
     private function resolveProvider(): string
     {
-        $configured = env('OCR_PROVIDER', 'mock');
+        $configured = env('OCR_PROVIDER', '');
 
         if ($configured === 'tesseract') {
             return 'tesseract';
@@ -34,7 +34,12 @@ class OcrService
         if ($configured === 'openai' && $this->openAiApiKey) {
             return 'openai';
         }
-        return 'mock';
+        return '';
+    }
+
+    public function isConfigured(): bool
+    {
+        return in_array($this->provider, ['tesseract', 'google', 'openai'], true);
     }
 
     public function getProvider(): string
@@ -44,11 +49,16 @@ class OcrService
 
     public function extractText(string $imageBase64, string $mimeType = 'image/jpeg'): string
     {
+        if ($this->provider === '') {
+            Log::error('OCR provider not configured. Set OCR_PROVIDER to tesseract, google, or openai in .env');
+            return '';
+        }
+
         return match ($this->provider) {
             'tesseract' => $this->tesseractOcr($imageBase64, $mimeType),
             'google' => $this->googleVision($imageBase64),
             'openai' => $this->openAiVision($imageBase64, $mimeType),
-            default => $this->mockExtract(),
+            default => '',
         };
     }
 
