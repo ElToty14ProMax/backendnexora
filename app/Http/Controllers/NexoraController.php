@@ -568,8 +568,6 @@ class NexoraController extends Controller
             "{$prefix}_ocr_confidence" => $ocrConfidence,
             "{$prefix}_ocr_provider" => $ocrProvider,
             "{$prefix}_ocr_raw_text" => $ocrRawText,
-            'has_sender_receipt' => $side === 'SENDER',
-            'has_receiver_receipt' => $side === 'RECEIVER',
         ];
 
         $existingHasSender = (bool) ($contribution->has_sender_receipt ?? false);
@@ -594,9 +592,9 @@ class NexoraController extends Controller
 
         $final = $this->contributionById($contribution->id);
 
-        if ((bool) $final->admin_review_required) {
+        if ((bool) ($final->admin_review_required ?? false)) {
             $this->sendVerificationReviewEmail($final);
-        } elseif (in_array($final->verification_status, ['insufficient_data', 'review_needed'], true)) {
+        } elseif (in_array($final->verification_status ?? '', ['insufficient_data', 'review_needed'], true)) {
             $this->sendIncompleteVerificationEmail($final);
         }
 
@@ -1369,11 +1367,11 @@ class NexoraController extends Controller
             return;
         }
 
-        $statusLabel = match ($contribution->verification_status) {
+        $statusLabel = match ($contribution->verification_status ?? '') {
             'no_match' => 'os IDs de transação de envio e recebimento não coincidem.',
-            'insufficient_data' => 'os dados do comprovante não são suficientes para determinación automática.',
-            'review_needed' => 'os dados precisam de revisión manual antes da confirmação.',
-            default => 'a verificação automatizada não pôde ser concluída.',
+            'insufficient_data' => 'os dados do comprovante não são suficientes para determinacao automatica.',
+            'review_needed' => 'os dados precisam de revisao manual antes da confirmacao.',
+            default => 'a verificacao automatica nao pode ser concluida.',
         };
 
         if (! $this->mailConfigured()) {
@@ -1602,7 +1600,7 @@ class NexoraController extends Controller
             'direction' => $row->donor_id === $currentUserId ? 'SENT' : 'RECEIVED',
             'amountCents' => (int) $row->amount_cents,
             'status' => $row->status,
-            'verificationStatus' => $row->verification_status,
+            'verificationStatus' => $row->verification_status ?? null,
             'createdAt' => (int) $row->created_at_ms,
             'confirmedAt' => $row->confirmed_at === null ? null : (int) $row->confirmed_at,
             'senderReceiptDate' => $row->sender_receipt_date,
@@ -1636,7 +1634,7 @@ class NexoraController extends Controller
             'receiverEmail' => $row->requester_email,
             'amountCents' => (int) $row->amount_cents,
             'status' => $row->status,
-            'verificationStatus' => $row->verification_status,
+            'verificationStatus' => $row->verification_status ?? null,
             'createdAt' => (int) $row->created_at_ms,
             'confirmedAt' => $row->confirmed_at === null ? null : (int) $row->confirmed_at,
             'transactionId' => $row->transaction_id,
@@ -1764,6 +1762,12 @@ class NexoraController extends Controller
             'receiver_receipt_mime_type' => null,
             'receiver_receipt_date' => null,
             'receiver_receipt_submitted_at' => null,
+            'sender_ocr_transaction_id' => null,
+            'receiver_ocr_transaction_id' => null,
+            'has_sender_receipt' => false,
+            'has_receiver_receipt' => false,
+            'verification_status' => null,
+            'admin_review_required' => false,
         ]);
     }
 
@@ -2026,6 +2030,11 @@ class NexoraController extends Controller
     private function nowMs(): int
     {
         return (int) floor(microtime(true) * 1000);
+    }
+
+    private function contributionById(string $id): ?object
+    {
+        return DB::table('contributions')->where('id', $id)->first();
     }
 
     private function parseDateFromRf(?string $date): ?string
