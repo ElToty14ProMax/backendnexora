@@ -1453,7 +1453,10 @@ class NexoraController extends Controller
     private function adminContributionResponse(object $row): array
     {
         $this->checkAndExpireContribution($row);
-        $row = $this->contributionById($row->id);
+        $row = $this->contributionWithJoinsById($row->id);
+        if ($row === null) {
+            return [];
+        }
         return [
             'id' => $row->id,
             'requestId' => $row->request_id,
@@ -1663,10 +1666,41 @@ class NexoraController extends Controller
         return DB::table('support_requests')->where('id', $id)->first();
     }
 
-    private function contributionById(string $id): ?object
+    private function contributionWithJoinsById(string $id): ?object
     {
-        return DB::table('contributions')->where('id', $id)->first();
+        // Load contribution with all related joined fields used in admin views
+        return DB::table('contributions')
+            ->where('contributions.id', $id)
+            ->join('support_requests', 'support_requests.id', '=', 'contributions.request_id')
+            ->join('users as donor', 'donor.id', '=', 'contributions.donor_id')
+            ->join('users as requester', 'requester.id', '=', 'support_requests.requester_id')
+            ->select(
+                'contributions.*',
+                'support_requests.public_code as request_public_code',
+                'support_requests.id as request_id',
+                'support_requests.amount_cents as request_amount_cents',
+                'support_requests.funded_cents as request_funded_cents',
+                'support_requests.status as request_status',
+                'donor.public_id as donor_public_id',
+                'donor.name as donor_name',
+                'donor.email as donor_email',
+                'requester.public_id as requester_public_id',
+                'requester.name as requester_name',
+                'requester.email as requester_email'
+            )
+            ->first();
     }
++    
++    private function contributionById(string $id): ?object
+     {
+         return DB::table('contributions')->where('id', $id)->first();
+     }
+
++    
++    private function contributionById(string $id): ?object
++    {
++        return DB::table('contributions')->where('id', $id)->first();
++    }
 
     private function uniquePublicId(): string
     {
