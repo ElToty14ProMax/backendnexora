@@ -4,11 +4,14 @@ namespace App\Http\Controllers;
 
 use App\Exceptions\ApiException;
 use App\Services\CpfValidator;
+use App\Services\OcrService;
 use App\Services\PixCopyCode;
+use App\Services\ReceiptAnalyzer;
 use App\Services\ReceitaFederalService;
 use App\Services\ReputationRules;
 use App\Services\RoadmapRules;
 use App\Services\SecurityService;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -21,8 +24,7 @@ class NexoraController extends Controller
     public function __construct(
         private readonly SecurityService $security,
         private readonly ReceitaFederalService $receita
-    )
-    {
+    ) {
         try {
             $this->ensureBootstrapSuperAdmin();
         } catch (\Throwable) {
@@ -57,11 +59,11 @@ class NexoraController extends Controller
         if ($birthDateObj === false || $birthDateObj->format('Y-m-d') !== $birthdate) {
             throw new ApiException(400, 'Data de nascimento invalida.');
         }
-        $minAgeDate = (new \DateTime())->modify('-13 years')->format('Y-m-d');
+        $minAgeDate = (new \DateTime)->modify('-13 years')->format('Y-m-d');
         if ($birthdate > $minAgeDate) {
             throw new ApiException(400, 'Precisa ter pelo menos 13 anos para se cadastrar.');
         }
-        $maxAgeDate = (new \DateTime())->modify('-120 years')->format('Y-m-d');
+        $maxAgeDate = (new \DateTime)->modify('-120 years')->format('Y-m-d');
         if ($birthdate < $maxAgeDate) {
             throw new ApiException(400, 'Data de nascimento invalida.');
         }
@@ -168,7 +170,7 @@ class NexoraController extends Controller
 
         return response()->json([
             'message' => 'Cadastro criado. Verifique o e-mail para continuar.',
-            'devVerificationCode' => $this->mailConfigured() || $this->isProduction() ? null : $code,
+            'devVerificationCode' => (! $this->mailConfigured() && ! $this->isProduction()) ? $code : null,
         ], 201);
     }
 
@@ -184,6 +186,7 @@ class NexoraController extends Controller
             ]);
             $this->sendVerificationCode($email, $user->name, $code);
         }
+
         return $this->ok('Se o cadastro existir, um novo código será enviado.');
     }
 
@@ -199,6 +202,7 @@ class NexoraController extends Controller
             ]);
             $this->sendRecoveryCode($email, $code);
         }
+
         return $this->ok('Se o e-mail existir, enviaremos instruções de recuperação.');
     }
 
@@ -222,6 +226,7 @@ class NexoraController extends Controller
             throw new ApiException(400, 'Código inválido ou expirado.');
         }
         $this->audit(null, 'PASSWORD_RESET', 'email:'.crc32($email));
+
         return $this->ok('Senha atualizada.');
     }
 
@@ -240,6 +245,7 @@ class NexoraController extends Controller
         if ($updated !== 1) {
             throw new ApiException(400, 'Código inválido ou expirado.');
         }
+
         return $this->ok('E-mail verificado. Aguarde a validação manual se necessário.');
     }
 
@@ -283,6 +289,7 @@ class NexoraController extends Controller
         $user = $this->requireUser($request);
         $stats = $this->dashboardStats();
         $roadmap = RoadmapRules::currentStep($this->levelCounts());
+
         return response()->json([
             'communityLiquidityCents' => $stats['liquidityCents'],
             'inCirculationCents' => $stats['inCirculationCents'],
@@ -312,6 +319,7 @@ class NexoraController extends Controller
     public function myRequests(Request $request): JsonResponse
     {
         $user = $this->requireUser($request);
+
         return response()->json(DB::table('support_requests')
             ->where('requester_id', $user->id)
             ->orderBy('created_at_ms')
@@ -328,14 +336,17 @@ class NexoraController extends Controller
                 $query->where('contributions.donor_id', $user->id)
                     ->orWhere('support_requests.requester_id', $user->id);
             })
-            ->orderBy('contributions.created_at_ms')
+            ->whereNotIn('contributions.status', ['EXPIRED', 'CANCELLED'])
+            ->orderBy('contributions.created_at_ms', 'desc')
             ->orderBy('contributions.id')
             ->get()
             ->map(function ($row) use ($user) {
                 $this->checkAndExpireContribution($row);
+
                 return $this->historyResponse($row, $user->id);
             })
             ->values();
+
         return response()->json($contributions);
     }
 
@@ -412,7 +423,7 @@ class NexoraController extends Controller
             if ($available <= 0) {
                 throw new ApiException(400, 'Esta solicitação já está totalmente reservada ou concluída por outros usuários.');
             }
-            throw new ApiException(400, 'Valor de apoio inválido. O máximo disponível para esta solicitação no momento é R$ ' . number_format($available / 100, 2, ',', '.'));
+            throw new ApiException(400, 'Valor de apoio inválido. O máximo disponível para esta solicitação no momento é R$ '.number_format($available / 100, 2, ',', '.'));
         }
 
         $contribution = DB::transaction(fn () => $this->insertContribution($support->id, $donor->id, $amountCents));
@@ -456,6 +467,7 @@ class NexoraController extends Controller
                 $created[] = [$contribution, $support];
                 $remaining -= $amount;
             }
+
             return $created;
         });
 
@@ -464,6 +476,7 @@ class NexoraController extends Controller
         }
         $instructions = array_map(fn ($item) => $this->instructionResponse($item[0], $item[1]), $created);
         $allocated = array_sum(array_column($instructions, 'amountCents'));
+
         return response()->json([
             'requestedAmountCents' => $total,
             'allocatedAmountCents' => $allocated,
@@ -499,12 +512,12 @@ class NexoraController extends Controller
             throw new ApiException(400, 'Hash do comprovante invalido.');
         }
         $imageBase64 = $this->validateReceiptImage((string) $request->input('receiptImageBase64', ''), (string) $request->input('receiptMimeType', 'image/jpeg'), $hash);
-        
+
         $mime = strtolower(trim((string) $request->input('receiptMimeType', 'image/jpeg')));
         $receiptDate = now('America/Sao_Paulo')->format('Y-m-d');
         $submittedAt = $this->nowMs();
         $prefix = $side === 'SENDER' ? 'sender' : 'receiver';
-        
+
         $providedTransactionId = trim((string) $request->input('transactionId', ''));
         $transactionId = null;
         $ocrResult = null;
@@ -514,11 +527,11 @@ class NexoraController extends Controller
         $ocrProvider = null;
         $ocrRawText = null;
 
-        if (!empty($providedTransactionId)) {
+        if (! empty($providedTransactionId)) {
             $transactionId = $this->normalizeTransactionId($providedTransactionId);
         } else {
-            $ocrService = new \App\Services\OcrService;
-            $analyzer = new \App\Services\ReceiptAnalyzer($ocrService);
+            $ocrService = new OcrService;
+            $analyzer = new ReceiptAnalyzer($ocrService);
             $cleanBase64 = str_contains($imageBase64, 'base64,') ? substr($imageBase64, strpos($imageBase64, 'base64,') + 7) : $imageBase64;
             $ocrResult = $analyzer->analyze($cleanBase64, $mime);
             $transactionId = $ocrResult['transactionId'] ? $this->normalizeTransactionId($ocrResult['transactionId']) : null;
@@ -555,15 +568,37 @@ class NexoraController extends Controller
             "{$prefix}_ocr_confidence" => $ocrConfidence,
             "{$prefix}_ocr_provider" => $ocrProvider,
             "{$prefix}_ocr_raw_text" => $ocrRawText,
+            'has_sender_receipt' => $side === 'SENDER',
+            'has_receiver_receipt' => $side === 'RECEIVER',
         ];
 
+        $existingHasSender = (bool) ($contribution->has_sender_receipt ?? false);
+        $existingHasReceiver = (bool) ($contribution->has_receiver_receipt ?? false);
+
+        $updateData['has_sender_receipt'] = $side === 'SENDER' ? true : $existingHasSender;
+        $updateData['has_receiver_receipt'] = $side === 'RECEIVER' ? true : $existingHasReceiver;
+
         DB::table('contributions')->where('id', $contribution->id)->update($updateData);
-        
+
         $updated = $this->contributionById($contribution->id);
         $this->updateOcrComparison($updated);
         $updated = $this->contributionById($contribution->id);
-        
+
         $this->audit($user->id, "PIX_{$side}_RECEIPT_SUBMITTED", $contribution->id);
+
+        $verificationStatus = $this->computeVerificationStatus($updated);
+        DB::table('contributions')->where('id', $contribution->id)->update([
+            'verification_status' => $verificationStatus,
+            'admin_review_required' => in_array($verificationStatus, ['insufficient_data', 'review_needed', 'no_match'], true),
+        ]);
+
+        $final = $this->contributionById($contribution->id);
+
+        if ((bool) $final->admin_review_required) {
+            $this->sendVerificationReviewEmail($final);
+        } elseif (in_array($final->verification_status, ['insufficient_data', 'review_needed'], true)) {
+            $this->sendIncompleteVerificationEmail($final);
+        }
 
         return response()->json([
             'contributionId' => $contribution->id,
@@ -576,9 +611,10 @@ class NexoraController extends Controller
             'receiptDate' => $receiptDate,
             'submittedAt' => $submittedAt,
             'status' => 'PENDING_ADMIN',
-            'hasSenderReceipt' => $this->hasSenderReceipt($updated),
-            'hasReceiverReceipt' => $this->hasReceiverReceipt($updated),
-            'evidenceComplete' => $this->evidenceComplete($updated),
+            'verificationStatus' => $verificationStatus,
+            'hasSenderReceipt' => $this->hasSenderReceipt($final),
+            'hasReceiverReceipt' => $this->hasReceiverReceipt($final),
+            'evidenceComplete' => $this->evidenceComplete($final),
             'ocrResult' => $ocrResult ? [
                 'transactionId' => $ocrTransactionId,
                 'amountCents' => $ocrAmountCents,
@@ -588,7 +624,7 @@ class NexoraController extends Controller
                 'date' => $ocrResult['date'] ?? null,
                 'time' => $ocrResult['time'] ?? null,
             ] : null,
-            'ocrComparison' => $this->getOcrComparison($updated),
+            'ocrComparison' => $this->getOcrComparison($final),
         ], 201);
     }
 
@@ -596,25 +632,30 @@ class NexoraController extends Controller
     {
         $senderOcrId = $contribution->sender_ocr_transaction_id;
         $receiverOcrId = $contribution->receiver_ocr_transaction_id;
-        
+
         if (empty($senderOcrId) || empty($receiverOcrId)) {
             return;
         }
-        
-        $normalizedSender = $this->normalizeTransactionId($senderOcrId);
-        $normalizedReceiver = $this->normalizeTransactionId($receiverOcrId);
-        
-        $result = 'MATCH';
-        $notes = null;
-        
-        if ($normalizedSender !== $normalizedReceiver) {
-            $result = 'NO_MATCH';
-            $notes = "Transaction ID do remetente ({$senderOcrId}) diferente do destinatário ({$receiverOcrId})";
-        }
-        
+
+        $normalizedSender = $this->normalizeTransactionId((string) $senderOcrId);
+        $normalizedReceiver = $this->normalizeTransactionId((string) $receiverOcrId);
+
+        $result = $normalizedSender === $normalizedReceiver ? 'MATCH' : 'NO_MATCH';
+        $notes = $result === 'NO_MATCH'
+            ? "Transaction ID do remetente ({$senderOcrId}) diferente do destinatário ({$receiverOcrId})"
+            : null;
+
+        $verificationStatus = match ($result) {
+            'MATCH' => 'match',
+            'NO_MATCH' => 'no_match',
+            default => 'review_needed',
+        };
+
         DB::table('contributions')->where('id', $contribution->id)->update([
             'ocr_comparison_result' => $result,
             'ocr_comparison_notes' => $notes,
+            'verification_status' => $verificationStatus,
+            'admin_review_required' => $result === 'NO_MATCH',
         ]);
     }
 
@@ -623,7 +664,7 @@ class NexoraController extends Controller
         if (empty($contribution->sender_ocr_transaction_id) && empty($contribution->receiver_ocr_transaction_id)) {
             return null;
         }
-        
+
         return [
             'senderTransactionId' => $contribution->sender_ocr_transaction_id,
             'receiverTransactionId' => $contribution->receiver_ocr_transaction_id,
@@ -634,6 +675,36 @@ class NexoraController extends Controller
             'senderProvider' => $contribution->sender_ocr_provider,
             'receiverProvider' => $contribution->receiver_ocr_provider,
         ];
+    }
+
+    private function computeVerificationStatus(object $contribution): string
+    {
+        $senderId = $this->normalizeTransactionId((string) ($contribution->sender_ocr_transaction_id ?? ''));
+        $receiverId = $this->normalizeTransactionId((string) ($contribution->receiver_ocr_transaction_id ?? ''));
+        $hasSenderReceipt = ! empty($contribution->sender_receipt_hash);
+        $hasReceiverReceipt = ! empty($contribution->receiver_receipt_hash);
+        $hasTransaction = ! empty($contribution->transaction_id);
+
+        if ($hasSenderReceipt && $hasReceiverReceipt && $hasTransaction) {
+            if ($senderId !== '' && $receiverId !== '' && $senderId === $receiverId) {
+                return 'match';
+            }
+            if ($senderId !== '' && $receiverId !== '' && $senderId !== $receiverId) {
+                return 'no_match';
+            }
+
+            return 'insufficient_data';
+        }
+
+        if (! $hasSenderReceipt || ! $hasReceiverReceipt) {
+            return 'awaiting_photos';
+        }
+
+        if (! $hasTransaction) {
+            return 'insufficient_data';
+        }
+
+        return 'review_needed';
     }
 
     public function analyzeReceipt(Request $request): JsonResponse
@@ -654,8 +725,8 @@ class NexoraController extends Controller
             throw new ApiException(400, 'Formato deve ser JPG, PNG ou WebP.');
         }
 
-        $ocrService = new \App\Services\OcrService;
-        $analyzer = new \App\Services\ReceiptAnalyzer($ocrService);
+        $ocrService = new OcrService;
+        $analyzer = new ReceiptAnalyzer($ocrService);
         $result = $analyzer->analyze($cleanBase64, $mimeType);
 
         return response()->json([
@@ -678,6 +749,7 @@ class NexoraController extends Controller
         $this->requireAdmin($request);
         $stats = $this->dashboardStats();
         $roadmap = RoadmapRules::currentStep($this->levelCounts());
+
         return response()->json([
             'communityLiquidityCents' => $stats['liquidityCents'],
             'inCirculationCents' => $stats['inCirculationCents'],
@@ -708,6 +780,7 @@ class NexoraController extends Controller
     {
         $this->requireAdmin($request);
         $limit = min(max((int) $request->query('limit', 80), 1), 250);
+
         return response()->json(DB::table('audit_logs')
             ->leftJoin('users', 'users.id', '=', 'audit_logs.actor_user_id')
             ->select('audit_logs.id', 'users.public_id as actorPublicId', 'audit_logs.action', 'audit_logs.target', 'audit_logs.created_at_ms as createdAt')
@@ -752,6 +825,7 @@ class NexoraController extends Controller
         $actor = $this->requireAdmin($request);
         DB::table('users')->where('id', $id)->update(['status' => 'APPROVED']);
         $this->audit($actor?->id, 'USER_STATUS_APPROVED', $id);
+
         return $this->ok('Usuário aprovado.');
     }
 
@@ -760,6 +834,7 @@ class NexoraController extends Controller
         $actor = $this->requireAdmin($request);
         DB::table('users')->where('id', $id)->update(['status' => 'BLOCKED']);
         $this->audit($actor?->id, 'USER_STATUS_BLOCKED', $id);
+
         return $this->ok('Usuário bloqueado.');
     }
 
@@ -772,6 +847,7 @@ class NexoraController extends Controller
         }
         DB::table('users')->where('id', $id)->update(['status' => 'APPROVED']);
         $this->audit($actor?->id, 'USER_STATUS_UNBLOCKED', $id);
+
         return $this->ok('Usuário desbloqueado.');
     }
 
@@ -780,6 +856,7 @@ class NexoraController extends Controller
         $actor = $this->requireAdmin($request);
         DB::table('users')->where('id', $id)->update(['admin_fee_due_cents' => 0, 'status' => 'APPROVED']);
         $this->audit($actor?->id, 'ADMIN_FEE_RESET', $id);
+
         return $this->ok('Taxa administrativa baixada.');
     }
 
@@ -792,6 +869,7 @@ class NexoraController extends Controller
         }
         DB::table('users')->where('id', $id)->update(['role' => $role]);
         $this->audit($actor?->id, "USER_ROLE_{$role}", $id);
+
         return $this->ok('Role atualizado.');
     }
 
@@ -808,6 +886,7 @@ class NexoraController extends Controller
         $fee = max((int) $request->input('adminFeeDueCents', $user->admin_fee_due_cents), 0);
         DB::table('users')->where('id', $id)->update(['xp' => $xp, 'level' => $level, 'buff_bps' => $buff, 'admin_fee_due_cents' => $fee]);
         $this->audit($actor?->id, 'USER_REPUTATION_UPDATED', $id);
+
         return $this->ok('Reputacao atualizada.');
     }
 
@@ -823,6 +902,7 @@ class NexoraController extends Controller
             DB::table('users')->delete();
         });
         $this->ensureBootstrapSuperAdmin();
+
         return $this->ok('Base de dados limpa. O Super Admin foi recriado.');
     }
 
@@ -891,6 +971,7 @@ class NexoraController extends Controller
                 $this->audit($actor?->id, 'ADMIN_FEE_LIMIT_BLOCKED', $requester->id);
             }
         });
+
         return $this->ok('Solicitacao aprovada.');
     }
 
@@ -902,6 +983,7 @@ class NexoraController extends Controller
             'rejected_reason' => Str::limit((string) $request->input('reason', ''), 280, ''),
         ]);
         $this->audit($actor?->id, 'SUPPORT_REQUEST_REJECTED', $id);
+
         return $this->ok('Solicitacao recusada.');
     }
 
@@ -930,6 +1012,7 @@ class NexoraController extends Controller
             }
             $this->audit($actor?->id, 'SUPPORT_RETURN_CONFIRMED', $id);
         });
+
         return $this->ok('Retorno validado e XP atualizado.');
     }
 
@@ -960,19 +1043,25 @@ class NexoraController extends Controller
         }
         $receipt = strtolower(trim((string) $request->query('receipt', '')));
         if ($receipt === 'complete') {
-            $query->whereNotNull('contributions.transaction_id')
-                ->whereNotNull('contributions.sender_receipt_hash')
-                ->whereNotNull('contributions.sender_receipt_image_base64')
-                ->whereNotNull('contributions.receiver_receipt_hash')
-                ->whereNotNull('contributions.receiver_receipt_image_base64');
+            $query->where('contributions.transaction_id', '<>', null)
+                ->where('contributions.has_sender_receipt', true)
+                ->where('contributions.has_receiver_receipt', true);
         } elseif ($receipt === 'missing') {
             $query->where(function ($builder) {
                 $builder->whereNull('contributions.transaction_id')
-                    ->orWhereNull('contributions.sender_receipt_hash')
-                    ->orWhereNull('contributions.sender_receipt_image_base64')
-                    ->orWhereNull('contributions.receiver_receipt_hash')
-                    ->orWhereNull('contributions.receiver_receipt_image_base64');
+                    ->orWhere('contributions.has_sender_receipt', false)
+                    ->orWhere('contributions.has_receiver_receipt', false);
             });
+        }
+        $verificationStatus = strtolower(trim((string) $request->query('verificationStatus', '')));
+        if ($verificationStatus !== '' && $verificationStatus !== 'all') {
+            $query->where('contributions.verification_status', $verificationStatus);
+        }
+        $adminReview = strtolower(trim((string) $request->query('adminReview', '')));
+        if ($adminReview === 'true') {
+            $query->where('contributions.admin_review_required', true);
+        } elseif ($adminReview === 'false') {
+            $query->where('contributions.admin_review_required', false);
         }
         $this->applyDateFilter($query, 'contributions.created_at_ms', $request);
         Log::info('NEXORA adminContributions: executing query...');
@@ -980,7 +1069,7 @@ class NexoraController extends Controller
         $rows = $query
             ->orderByDesc('contributions.created_at_ms')
             ->get();
-        Log::info('NEXORA adminContributions: got ' . count($rows) . ' rows, mapping...');
+        Log::info('NEXORA adminContributions: got '.count($rows).' rows, mapping...');
 
         return response()->json($rows
             ->map(fn ($row) => $this->adminContributionResponse($row))
@@ -1008,13 +1097,19 @@ class NexoraController extends Controller
             }
             $confirmedAt = $this->nowMs();
             $newFunded = (int) $support->funded_cents + (int) $contribution->amount_cents;
-            DB::table('contributions')->where('id', $id)->update(['status' => 'CONFIRMED', 'confirmed_at' => $confirmedAt]);
+            DB::table('contributions')->where('id', $id)->update([
+                'status' => 'CONFIRMED',
+                'confirmed_at' => $confirmedAt,
+                'verification_status' => 'match',
+                'admin_review_required' => false,
+            ]);
             DB::table('support_requests')->where('id', $support->id)->update([
                 'funded_cents' => $newFunded,
                 'status' => $newFunded >= (int) $support->amount_cents ? 'FUNDED' : 'OPEN',
             ]);
             $this->audit($actor?->id, 'CONTRIBUTION_CONFIRMED', $id);
         });
+
         return $this->ok('Apoio validado.');
     }
 
@@ -1028,8 +1123,13 @@ class NexoraController extends Controller
         if (in_array($contribution->status, ['CONFIRMED', 'RETURNED'], true)) {
             throw new ApiException(409, 'Não é possível desativar um apoio já confirmado ou retornado.');
         }
-        DB::table('contributions')->where('id', $id)->update(['status' => 'CANCELLED']);
+        DB::table('contributions')->where('id', $id)->update([
+            'status' => 'CANCELLED',
+            'verification_status' => 'cancelled',
+            'admin_review_required' => false,
+        ]);
         $this->audit($actor?->id, 'CONTRIBUTION_DEACTIVATED', $id);
+
         return $this->ok('Apoio desativado.');
     }
 
@@ -1047,8 +1147,13 @@ class NexoraController extends Controller
         if ($support === null || ! in_array($support->status, ['OPEN', 'FUNDED'], true)) {
             throw new ApiException(409, 'A solicitação vinculada não está ativa.');
         }
-        DB::table('contributions')->where('id', $id)->update(['status' => 'PENDING_ADMIN']);
+        DB::table('contributions')->where('id', $id)->update([
+            'status' => 'PENDING_ADMIN',
+            'verification_status' => 'pending_verification',
+            'admin_review_required' => false,
+        ]);
         $this->audit($actor?->id, 'CONTRIBUTION_ACTIVATED', $id);
+
         return $this->ok('Apoio reativado.');
     }
 
@@ -1067,8 +1172,13 @@ class NexoraController extends Controller
 
         $count = 0;
         foreach ($expiredContributions as $contribution) {
-            DB::table('contributions')->where('id', $contribution->id)->update(['status' => 'EXPIRED']);
+            DB::table('contributions')->where('id', $contribution->id)->update([
+                'status' => 'EXPIRED',
+                'verification_status' => 'insufficient_data',
+                'admin_review_required' => false,
+            ]);
             $this->audit(null, 'CONTRIBUTION_EXPIRED', $contribution->id);
+            $this->sendExpirationNotification($contribution);
             $count++;
         }
 
@@ -1086,15 +1196,22 @@ class NexoraController extends Controller
         }
         $twentyFourHoursAgo = $this->nowMs() - (24 * 60 * 60 * 1000);
         if ($contribution->created_at_ms < $twentyFourHoursAgo) {
-            $hasReceipts = ! empty($contribution->sender_receipt_hash) && 
-                           ! empty($contribution->receiver_receipt_hash) && 
-                           ! empty($contribution->transaction_id);
-            if (! $hasReceipts) {
-                DB::table('contributions')->where('id', $contribution->id)->update(['status' => 'EXPIRED']);
-                $this->sendExpirationNotification($contribution);
+            $hasSender = ! empty($contribution->sender_receipt_hash) || (bool) ($contribution->has_sender_receipt ?? false);
+            $hasReceiver = ! empty($contribution->receiver_receipt_hash) || (bool) ($contribution->has_receiver_receipt ?? false);
+            if (! $hasSender || ! $hasReceiver || empty($contribution->transaction_id)) {
+                DB::table('contributions')->where('id', $contribution->id)->update([
+                    'status' => 'EXPIRED',
+                    'verification_status' => 'insufficient_data',
+                    'admin_review_required' => false,
+                ]);
+                $expired = $this->contributionById($contribution->id);
+                $this->audit(null, 'CONTRIBUTION_EXPIRED', $contribution->id);
+                $this->sendExpirationNotification($expired);
+
                 return true;
             }
         }
+
         return false;
     }
 
@@ -1118,6 +1235,7 @@ class NexoraController extends Controller
     {
         if (! $this->mailConfigured()) {
             Log::info("NEXORA DEV EMAIL: expiration notification for {$to} - contribution {$contributionId}");
+
             return;
         }
         try {
@@ -1140,24 +1258,25 @@ class NexoraController extends Controller
         }
         $donor = $this->userById($contribution->donor_id);
         $requester = $this->userById($support->requester_id);
-        $missingSender = empty($contribution->sender_receipt_hash);
-        $missingReceiver = empty($contribution->receiver_receipt_hash);
+        $missingSender = empty($contribution->sender_receipt_hash) && ! (bool) ($contribution->has_sender_receipt ?? false);
+        $missingReceiver = empty($contribution->receiver_receipt_hash) && ! (bool) ($contribution->has_receiver_receipt ?? false);
         $missingTransaction = empty($contribution->transaction_id);
-        $message = "";
+        $message = [];
         if ($missingSender) {
-            $message .= "- Falta o comprovante de envio\n";
+            $message[] = 'Falta o comprovante de envio (foto do remetente)';
         }
         if ($missingReceiver) {
-            $message .= "- Falta o comprovante de recebimento\n";
+            $message[] = 'Falta o comprovante de recebimento (foto do destinatario)';
         }
         if ($missingTransaction) {
-            $message .= "- Falta o ID da transação\n";
+            $message[] = 'ID da transação não detectado na imagem';
         }
+        $messageText = implode("\n", $message);
         if ($donor !== null && ($missingSender || $missingTransaction)) {
-            $this->sendIncompleteNotificationEmail($donor->email, $donor->name, $contribution->id, $support->public_code, $message);
+            $this->sendIncompleteNotificationEmail($donor->email, $donor->name, $contribution->id, $support->public_code, $messageText);
         }
         if ($requester !== null && ($missingReceiver || $missingTransaction)) {
-            $this->sendIncompleteNotificationEmail($requester->email, $requester->name, $contribution->id, $support->public_code, $message);
+            $this->sendIncompleteNotificationEmail($requester->email, $requester->name, $contribution->id, $support->public_code, $messageText);
         }
     }
 
@@ -1165,6 +1284,7 @@ class NexoraController extends Controller
     {
         if (! $this->mailConfigured()) {
             Log::info("NEXORA DEV EMAIL: incomplete verification notification for {$to} - contribution {$contributionId}");
+
             return;
         }
         try {
@@ -1194,9 +1314,12 @@ class NexoraController extends Controller
         DB::table('contributions')->where('id', $id)->update([
             'status' => 'CANCELLED',
             'rejected_reason' => $reason,
+            'verification_status' => 'cancelled',
+            'admin_review_required' => false,
         ]);
         $this->audit($actor?->id, 'CONTRIBUTION_REJECTED', $id);
         $this->sendContributionRejectionEmail($contribution, $reason);
+
         return $this->ok('Apoio recusado.');
     }
 
@@ -1220,6 +1343,7 @@ class NexoraController extends Controller
     {
         if (! $this->mailConfigured()) {
             Log::info("NEXORA DEV EMAIL: rejection notification for {$to} - contribution {$contributionId}");
+
             return;
         }
         try {
@@ -1229,6 +1353,41 @@ class NexoraController extends Controller
         } catch (\Throwable $error) {
             Log::error('NEXORA MAIL ERROR: rejection email failed', [
                 'to_hash' => hash('sha256', $this->security->normalizeEmail($to)),
+                'message' => $error->getMessage(),
+            ]);
+        }
+    }
+
+    private function sendVerificationReviewEmail(object $contribution): void
+    {
+        $support = $this->supportById($contribution->request_id);
+        if ($support === null) {
+            return;
+        }
+        $requester = $this->userById($support->requester_id);
+        if ($requester === null) {
+            return;
+        }
+
+        $statusLabel = match ($contribution->verification_status) {
+            'no_match' => 'os IDs de transação de envio e recebimento não coincidem.',
+            'insufficient_data' => 'os dados do comprovante não são suficientes para determinación automática.',
+            'review_needed' => 'os dados precisam de revisión manual antes da confirmação.',
+            default => 'a verificação automatizada não pôde ser concluída.',
+        };
+
+        if (! $this->mailConfigured()) {
+            Log::info("NEXORA DEV EMAIL: verification review needed for contribution {$contribution->id} — status: {$contribution->verification_status}");
+
+            return;
+        }
+        try {
+            Mail::raw("Olá, {$requester->name}.\n\nNão foi possível validar automaticamente a transação {$contribution->id} da solicitação {$support->public_code} porque {$statusLabel}\n\nUm administrador irá revisar o caso e entrará em contato em breve.\n\nVocê também pode verificar o status na sua página de transações.\n\nEquipe Nexora", function ($message) use ($requester) {
+                $message->to($requester->email)->subject('Verificação pendente de revisão - Nexora');
+            });
+        } catch (\Throwable $error) {
+            Log::error('NEXORA MAIL ERROR: verification review email failed', [
+                'to_hash' => hash('sha256', $this->security->normalizeEmail($requester->email)),
                 'message' => $error->getMessage(),
             ]);
         }
@@ -1253,6 +1412,7 @@ class NexoraController extends Controller
         if ($row === null) {
             throw new ApiException(401, 'Sessão inválida.');
         }
+
         return $row;
     }
 
@@ -1266,6 +1426,7 @@ class NexoraController extends Controller
         if (! in_array($user->role, ['ADMIN', 'SUPER_ADMIN'], true)) {
             throw new ApiException(403, 'Acesso administrativo restrito.');
         }
+
         return $user;
     }
 
@@ -1278,6 +1439,7 @@ class NexoraController extends Controller
         if ($user->role !== 'SUPER_ADMIN') {
             throw new ApiException(403, 'Acesso de super admin restrito.');
         }
+
         return $user;
     }
 
@@ -1440,6 +1602,7 @@ class NexoraController extends Controller
             'direction' => $row->donor_id === $currentUserId ? 'SENT' : 'RECEIVED',
             'amountCents' => (int) $row->amount_cents,
             'status' => $row->status,
+            'verificationStatus' => $row->verification_status,
             'createdAt' => (int) $row->created_at_ms,
             'confirmedAt' => $row->confirmed_at === null ? null : (int) $row->confirmed_at,
             'senderReceiptDate' => $row->sender_receipt_date,
@@ -1457,6 +1620,7 @@ class NexoraController extends Controller
         if ($row === null) {
             return [];
         }
+
         return [
             'id' => $row->id,
             'requestId' => $row->request_id,
@@ -1472,6 +1636,7 @@ class NexoraController extends Controller
             'receiverEmail' => $row->requester_email,
             'amountCents' => (int) $row->amount_cents,
             'status' => $row->status,
+            'verificationStatus' => $row->verification_status,
             'createdAt' => (int) $row->created_at_ms,
             'confirmedAt' => $row->confirmed_at === null ? null : (int) $row->confirmed_at,
             'transactionId' => $row->transaction_id,
@@ -1485,9 +1650,11 @@ class NexoraController extends Controller
             'receiverReceiptSubmittedAt' => $row->receiver_receipt_submitted_at === null ? null : (int) $row->receiver_receipt_submitted_at,
             'receiverReceiptImageBase64' => $row->receiver_receipt_image_base64,
             'receiverReceiptMimeType' => $row->receiver_receipt_mime_type,
-            'hasSenderReceipt' => $this->hasSenderReceipt($row),
-            'hasReceiverReceipt' => $this->hasReceiverReceipt($row),
-            'evidenceComplete' => $this->evidenceComplete($row),
+            'hasSenderReceipt' => ! empty($row->sender_receipt_hash) || (bool) ($row->has_sender_receipt ?? false),
+            'hasReceiverReceipt' => ! empty($row->receiver_receipt_hash) || (bool) ($row->has_receiver_receipt ?? false),
+            'evidenceComplete' => ! empty($row->transaction_id)
+                && (! empty($row->sender_receipt_hash) || (bool) ($row->has_sender_receipt ?? false))
+                && (! empty($row->receiver_receipt_hash) || (bool) ($row->has_receiver_receipt ?? false)),
             'senderOcrTransactionId' => $row->sender_ocr_transaction_id,
             'senderOcrAmountCents' => $row->sender_ocr_amount_cents,
             'senderOcrConfidence' => $row->sender_ocr_confidence,
@@ -1522,10 +1689,11 @@ class NexoraController extends Controller
             return null;
         }
         try {
-            $date = \Carbon\Carbon::parse($text, 'America/Sao_Paulo');
+            $date = Carbon::parse($text, 'America/Sao_Paulo');
             if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $text)) {
                 $date = $endOfDay ? $date->endOfDay() : $date->startOfDay();
             }
+
             return $date->getTimestampMs();
         } catch (\Throwable) {
             return null;
@@ -1539,6 +1707,7 @@ class NexoraController extends Controller
         $activeRequests = DB::table('support_requests')->whereIn('status', ['OPEN', 'FUNDED'])->count();
         $completed = DB::table('support_requests')->where('status', 'RETURNED')->count();
         $delayed = DB::table('support_requests')->where('status', 'FUNDED')->whereNotNull('due_at')->where('due_at', '<', $this->nowMs())->count();
+
         return [
             'liquidityCents' => $liquidity,
             'inCirculationCents' => $inCirculation,
@@ -1566,6 +1735,7 @@ class NexoraController extends Controller
             ->where('request_id', $support->id)
             ->whereIn('status', ['PENDING_ADMIN', 'CONFIRMED'])
             ->sum('amount_cents');
+
         return max((int) $support->amount_cents - $reserved, 0);
     }
 
@@ -1581,6 +1751,7 @@ class NexoraController extends Controller
             'confirmed_at' => null,
         ];
         DB::table('contributions')->insert($row);
+
         return (object) array_merge($row, [
             'transaction_id' => null,
             'sender_receipt_hash' => null,
@@ -1628,6 +1799,7 @@ class NexoraController extends Controller
         if (hash('sha256', $bytes) !== strtolower($expectedSha256)) {
             throw new ApiException(400, 'Hash da foto não confere com o comprovante enviado.');
         }
+
         return $cleanBase64;
     }
 
@@ -1690,17 +1862,6 @@ class NexoraController extends Controller
             )
             ->first();
     }
-+    
-+    private function contributionById(string $id): ?object
-     {
-         return DB::table('contributions')->where('id', $id)->first();
-     }
-
-+    
-+    private function contributionById(string $id): ?object
-+    {
-+        return DB::table('contributions')->where('id', $id)->first();
-+    }
 
     private function uniquePublicId(): string
     {
@@ -1770,6 +1931,7 @@ class NexoraController extends Controller
             if ($updates !== []) {
                 DB::table('users')->where('id', $existing->id)->update($updates);
             }
+
             return;
         }
         $now = $this->nowMs();
@@ -1805,6 +1967,7 @@ class NexoraController extends Controller
     {
         if (! $this->mailConfigured()) {
             Log::info("NEXORA DEV EMAIL: verification code for {$to} is {$code}");
+
             return;
         }
 
@@ -1824,6 +1987,7 @@ class NexoraController extends Controller
     {
         if (! $this->mailConfigured()) {
             Log::info("NEXORA DEV EMAIL: recovery code for {$to} is {$code}");
+
             return;
         }
 
@@ -1850,6 +2014,7 @@ class NexoraController extends Controller
         if (strlen($clean) <= 6) {
             return '***';
         }
+
         return substr($clean, 0, min(3, strlen($clean))).'***'.substr($clean, -min(3, strlen($clean)));
     }
 
@@ -1876,6 +2041,7 @@ class NexoraController extends Controller
                 return $dt->format('Y-m-d');
             }
         }
+
         return null;
     }
 }
