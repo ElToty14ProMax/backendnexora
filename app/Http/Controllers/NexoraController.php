@@ -628,8 +628,8 @@ class NexoraController extends Controller
 
     private function updateOcrComparison(object $contribution): void
     {
-        $senderOcrId = $contribution->sender_ocr_transaction_id;
-        $receiverOcrId = $contribution->receiver_ocr_transaction_id;
+        $senderOcrId = $contribution->sender_ocr_transaction_id ?? null;
+        $receiverOcrId = $contribution->receiver_ocr_transaction_id ?? null;
 
         if (empty($senderOcrId) || empty($receiverOcrId)) {
             return;
@@ -659,19 +659,22 @@ class NexoraController extends Controller
 
     private function getOcrComparison(object $contribution): ?array
     {
-        if (empty($contribution->sender_ocr_transaction_id) && empty($contribution->receiver_ocr_transaction_id)) {
+        $senderTransactionId = $contribution->sender_ocr_transaction_id ?? null;
+        $receiverTransactionId = $contribution->receiver_ocr_transaction_id ?? null;
+
+        if (empty($senderTransactionId) && empty($receiverTransactionId)) {
             return null;
         }
 
         return [
-            'senderTransactionId' => $contribution->sender_ocr_transaction_id,
-            'receiverTransactionId' => $contribution->receiver_ocr_transaction_id,
-            'result' => $contribution->ocr_comparison_result,
-            'notes' => $contribution->ocr_comparison_notes,
-            'senderConfidence' => $contribution->sender_ocr_confidence,
-            'receiverConfidence' => $contribution->receiver_ocr_confidence,
-            'senderProvider' => $contribution->sender_ocr_provider,
-            'receiverProvider' => $contribution->receiver_ocr_provider,
+            'senderTransactionId' => $senderTransactionId,
+            'receiverTransactionId' => $receiverTransactionId,
+            'result' => $contribution->ocr_comparison_result ?? null,
+            'notes' => $contribution->ocr_comparison_notes ?? null,
+            'senderConfidence' => $contribution->sender_ocr_confidence ?? null,
+            'receiverConfidence' => $contribution->receiver_ocr_confidence ?? null,
+            'senderProvider' => $contribution->sender_ocr_provider ?? null,
+            'receiverProvider' => $contribution->receiver_ocr_provider ?? null,
         ];
     }
 
@@ -1653,18 +1656,18 @@ class NexoraController extends Controller
             'evidenceComplete' => ! empty($row->transaction_id)
                 && (! empty($row->sender_receipt_hash) || (bool) ($row->has_sender_receipt ?? false))
                 && (! empty($row->receiver_receipt_hash) || (bool) ($row->has_receiver_receipt ?? false)),
-            'senderOcrTransactionId' => $row->sender_ocr_transaction_id,
-            'senderOcrAmountCents' => $row->sender_ocr_amount_cents,
-            'senderOcrConfidence' => $row->sender_ocr_confidence,
-            'senderOcrProvider' => $row->sender_ocr_provider,
-            'senderOcrRawText' => $row->sender_ocr_raw_text,
-            'receiverOcrTransactionId' => $row->receiver_ocr_transaction_id,
-            'receiverOcrAmountCents' => $row->receiver_ocr_amount_cents,
-            'receiverOcrConfidence' => $row->receiver_ocr_confidence,
-            'receiverOcrProvider' => $row->receiver_ocr_provider,
-            'receiverOcrRawText' => $row->receiver_ocr_raw_text,
-            'ocrComparisonResult' => $row->ocr_comparison_result,
-            'ocrComparisonNotes' => $row->ocr_comparison_notes,
+            'senderOcrTransactionId' => $row->sender_ocr_transaction_id ?? null,
+            'senderOcrAmountCents' => $row->sender_ocr_amount_cents ?? null,
+            'senderOcrConfidence' => $row->sender_ocr_confidence ?? null,
+            'senderOcrProvider' => $row->sender_ocr_provider ?? null,
+            'senderOcrRawText' => $row->sender_ocr_raw_text ?? null,
+            'receiverOcrTransactionId' => $row->receiver_ocr_transaction_id ?? null,
+            'receiverOcrAmountCents' => $row->receiver_ocr_amount_cents ?? null,
+            'receiverOcrConfidence' => $row->receiver_ocr_confidence ?? null,
+            'receiverOcrProvider' => $row->receiver_ocr_provider ?? null,
+            'receiverOcrRawText' => $row->receiver_ocr_raw_text ?? null,
+            'ocrComparisonResult' => $row->ocr_comparison_result ?? null,
+            'ocrComparisonNotes' => $row->ocr_comparison_notes ?? null,
         ];
     }
 
