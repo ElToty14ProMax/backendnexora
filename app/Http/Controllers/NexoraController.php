@@ -338,13 +338,15 @@ class NexoraController extends Controller
                 $query->where('contributions.donor_id', $user->id)
                     ->orWhere('support_requests.requester_id', $user->id);
             })
-            ->whereNotIn('contributions.status', ['EXPIRED', 'CANCELLED'])
             ->orderBy('contributions.created_at_ms', 'desc')
             ->orderBy('contributions.id')
             ->get()
             ->map(function ($row) use ($user) {
                 if ($this->checkAndExpireContribution($row)) {
-                    return null;
+                    $row = $this->contributionWithJoinsById($row->id);
+                    if ($row === null) {
+                        return null;
+                    }
                 }
 
                 return $this->historyResponse($row, $user->id);
