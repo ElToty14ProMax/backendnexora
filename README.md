@@ -19,7 +19,7 @@ NEXORA_ENV=dev
 NEXORA_ADMIN_TOKEN=replace-with-32-plus-random-chars
 NEXORA_DATA_KEY_B64=base64-encoded-32-byte-key
 NEXORA_CPF_PEPPER=replace-with-long-random-pepper
-NEXORA_ADMIN_PIX_KEY=your-admin-fee-pix-key
+NEXORA_ADMIN_PIX_KEY=bank-generated-random-pix-key-uuid-v4
 NEXORA_CONTRIBUTION_EXPIRATION_MINUTES=5
 NEXORA_SUPER_ADMIN_EMAIL=admin@example.com
 NEXORA_SUPER_ADMIN_CPF=valid-founder-cpf
@@ -95,7 +95,7 @@ NEXORA_ENV=prod
 NEXORA_ADMIN_TOKEN=replace-with-32-plus-random-chars
 NEXORA_DATA_KEY_B64=base64-encoded-32-byte-key
 NEXORA_CPF_PEPPER=replace-with-long-random-pepper
-NEXORA_ADMIN_PIX_KEY=your-admin-fee-pix-key
+NEXORA_ADMIN_PIX_KEY=bank-generated-random-pix-key-uuid-v4
 NEXORA_SUPER_ADMIN_EMAIL=admin@example.com
 NEXORA_SUPER_ADMIN_CPF=valid-founder-cpf
 NEXORA_SUPER_ADMIN_PASSWORD=bootstrap-password
@@ -108,6 +108,8 @@ OCR_SPACE_ENGINE=2
 ```
 
 If the Vercel Neon integration creates `DATABASE_URL`, `POSTGRES_URL`, `PGHOST`, `PGUSER`, and `PGPASSWORD`, Laravel will use those automatically. You only need to add `DB_CONNECTION=pgsql` and the Nexora application secrets. For Neon pooled connections, keep `DB_DISABLE_PREPARES=true` and `DB_EMULATE_PREPARES=false` so PostgreSQL transactions work correctly through PgBouncer.
+
+Pix keys accepted by Nexora must be the bank-generated random key (EVP UUID v4), for example `550e8400-e29b-41d4-a716-446655440000`. CPF, email, and phone Pix keys are rejected at registration and when generating Pix copy/paste codes.
 
 Generate `APP_KEY` locally:
 

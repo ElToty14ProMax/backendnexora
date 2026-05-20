@@ -7,6 +7,7 @@ use App\Exceptions\ApiException;
 class SecurityService
 {
     private const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    private const RANDOM_PIX_KEY_PATTERN = '/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/';
 
     public function normalizeEmail(string $email): string
     {
@@ -21,13 +22,7 @@ class SecurityService
 
     public function isValidPixKey(string $value): bool
     {
-        $clean = trim($value);
-        $digits = preg_replace('/\D+/', '', $clean) ?? '';
-        $isRandom = preg_match('/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/', $clean) === 1;
-        $isCpf = CpfValidator::isValid($clean);
-        $isPhone = str_starts_with($clean, '+55') && strlen($digits) >= 12 && strlen($digits) <= 13;
-        $isEmail = $this->isValidEmail($clean);
-        return $isRandom || $isCpf || $isPhone || $isEmail;
+        return preg_match(self::RANDOM_PIX_KEY_PATTERN, trim($value)) === 1;
     }
 
     public function isValidSha256(string $value): bool

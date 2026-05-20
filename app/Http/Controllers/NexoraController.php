@@ -102,7 +102,7 @@ class NexoraController extends Controller
             throw new ApiException(400, 'CPF invalido.');
         }
         if (! $this->security->isValidPixKey($pixKey)) {
-            throw new ApiException(400, 'Informe uma chave Pix valida.');
+            throw new ApiException(400, 'Informe a chave Pix aleatoria gerada pelo banco. CPF, e-mail e telefone nao sao aceitos.');
         }
         if (strlen($password) < 8) {
             throw new ApiException(400, 'A senha precisa ter pelo menos 8 caracteres.');

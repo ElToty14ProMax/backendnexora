@@ -4,6 +4,8 @@ namespace App\Services;
 
 class PixCopyCode
 {
+    private const RANDOM_PIX_KEY_PATTERN = '/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/';
+
     public static function build(string $receiverPixKey, int $amountCents, string $txid, string $merchantName = 'NEXORA', string $merchantCity = 'SAO PAULO'): string
     {
         $pixKey = self::normalizePixKey($receiverPixKey);
@@ -32,34 +34,11 @@ class PixCopyCode
     public static function normalizePixKey(string $value): string
     {
         $clean = trim($value);
-        $digits = preg_replace('/\D+/', '', $clean) ?? '';
-
-        $isRandom = preg_match('/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/', $clean) === 1;
-        if ($isRandom) {
+        if (preg_match(self::RANDOM_PIX_KEY_PATTERN, $clean) === 1) {
             return strtolower($clean);
         }
 
-        if (filter_var($clean, FILTER_VALIDATE_EMAIL) !== false) {
-            return $clean;
-        }
-
-        if (preg_match('/^\+55\d{10,11}$/', $clean) === 1) {
-            return $clean;
-        }
-
-        if (strlen($digits) === 11 && self::isValidCpf($digits)) {
-            return $digits;
-        }
-
-        if (strlen($digits) === 11) {
-            return '+55'.$digits;
-        }
-
-        if (strlen($digits) === 13 && str_starts_with($digits, '55')) {
-            return '+'.$digits;
-        }
-
-        throw new \InvalidArgumentException('Chave Pix do destinatario invalida.');
+        throw new \InvalidArgumentException('Chave Pix do destinatario deve ser a chave aleatoria gerada pelo banco.');
     }
 
     private static function tag(string $id, string $value): string
@@ -98,19 +77,4 @@ class PixCopyCode
         return strtoupper(str_pad(dechex($crc), 4, '0', STR_PAD_LEFT));
     }
 
-    private static function isValidCpf(string $cpf): bool
-    {
-        if (strlen($cpf) !== 11 || count(array_unique(str_split($cpf))) === 1) {
-            return false;
-        }
-        $digit = function (int $length) use ($cpf): int {
-            $sum = 0;
-            for ($i = 0; $i < $length; $i++) {
-                $sum += (int) $cpf[$i] * ($length + 1 - $i);
-            }
-            $result = ($sum * 10) % 11;
-            return $result === 10 ? 0 : $result;
-        };
-        return (int) $cpf[9] === $digit(9) && (int) $cpf[10] === $digit(10);
-    }
 }

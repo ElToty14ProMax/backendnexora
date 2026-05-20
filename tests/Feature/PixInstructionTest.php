@@ -14,7 +14,7 @@ class PixInstructionTest extends TestCase
 
     public function test_contribution_pix_code_uses_the_requester_pix_key_not_the_admin_key(): void
     {
-        config(['nexora.admin_pix_key' => 'admin@example.com']);
+        config(['nexora.admin_pix_key' => '00000000-0000-4000-8000-000000000000']);
 
         $security = app(SecurityService::class);
         $now = (int) floor(microtime(true) * 1000);
@@ -31,7 +31,7 @@ class PixInstructionTest extends TestCase
                 'email_verified' => true,
                 'cpf_hash' => $security->hashCpf('52998224725'),
                 'cpf_cipher' => $security->encrypt('52998224725'),
-                'pix_cipher' => $security->encrypt('recebedora@example.com'),
+                'pix_cipher' => $security->encrypt('550e8400-e29b-41d4-a716-446655440000'),
                 'password_hash' => $security->hashPassword('SenhaTeste123'),
                 'status' => 'APPROVED',
                 'role' => 'USER',
@@ -46,7 +46,7 @@ class PixInstructionTest extends TestCase
                 'email_verified' => true,
                 'cpf_hash' => $security->hashCpf('11144477735'),
                 'cpf_cipher' => $security->encrypt('11144477735'),
-                'pix_cipher' => $security->encrypt('doadora@example.com'),
+                'pix_cipher' => $security->encrypt('9f4c2c7e-7f9b-45c0-8c33-0fa84fb8867b'),
                 'password_hash' => $security->hashPassword('SenhaTeste123'),
                 'status' => 'APPROVED',
                 'role' => 'USER',
@@ -83,8 +83,8 @@ class PixInstructionTest extends TestCase
         $response->assertCreated();
         $payload = $response->json('pixCopyCode');
 
-        $this->assertStringContainsString('recebedora@example.com', $payload);
-        $this->assertStringNotContainsString('admin@example.com', $payload);
+        $this->assertStringContainsString('550e8400-e29b-41d4-a716-446655440000', $payload);
+        $this->assertStringNotContainsString('00000000-0000-4000-8000-000000000000', $payload);
         $this->assertSame('', $response->json('receiverPixKey'));
     }
 }
