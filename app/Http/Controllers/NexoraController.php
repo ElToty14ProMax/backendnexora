@@ -14,9 +14,11 @@ use App\Services\SecurityService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
 class NexoraController extends Controller
@@ -341,10 +343,13 @@ class NexoraController extends Controller
             ->orderBy('contributions.id')
             ->get()
             ->map(function ($row) use ($user) {
-                $this->checkAndExpireContribution($row);
+                if ($this->checkAndExpireContribution($row)) {
+                    return null;
+                }
 
                 return $this->historyResponse($row, $user->id);
             })
+            ->filter()
             ->values();
 
         return response()->json($contributions);
@@ -740,7 +745,7 @@ class NexoraController extends Controller
         $result = $analyzer->analyze($cleanBase64, $mimeType);
 
         return response()->json([
-            'ok' => true,
+            'ok' => (bool) $result['isPixReceipt'],
             'transactionId' => $result['transactionId'],
             'amountCents' => $result['amountCents'],
             'amountFormatted' => $result['amountFormatted'],
@@ -1152,8 +1157,8 @@ class NexoraController extends Controller
         if ($contribution === null) {
             throw new ApiException(404, 'Apoio não encontrado.');
         }
-        if ($contribution->status !== 'CANCELLED') {
-            throw new ApiException(409, 'Apenas apoios cancelados podem ser reativados.');
+        if (! in_array($contribution->status, ['CANCELLED', 'EXPIRED'], true)) {
+            throw new ApiException(409, 'Apenas apoios cancelados ou expirados podem ser reativados.');
         }
         $support = $this->supportById($contribution->request_id);
         if ($support === null || ! in_array($support->status, ['OPEN', 'FUNDED'], true)) {
@@ -1169,12 +1174,31 @@ class NexoraController extends Controller
         return $this->ok('Apoio reativado.');
     }
 
+    public function runMigrations(Request $request): JsonResponse
+    {
+        $this->requireAdmin($request);
+
+        Artisan::call('migrate', ['--force' => true]);
+
+        return response()->json([
+            'ok' => true,
+            'message' => 'Migracoes executadas.',
+            'output' => trim(Artisan::output()),
+            'columns' => [
+                'users.birthdate' => Schema::hasColumn('users', 'birthdate'),
+                'contributions.verification_status' => Schema::hasColumn('contributions', 'verification_status'),
+                'contributions.admin_review_required' => Schema::hasColumn('contributions', 'admin_review_required'),
+                'contributions.rejected_reason' => Schema::hasColumn('contributions', 'rejected_reason'),
+            ],
+        ]);
+    }
+
     public function checkExpiredContributions(): JsonResponse
     {
-        $twentyFourHoursAgo = $this->nowMs() - (24 * 60 * 60 * 1000);
+        $expirationCutoff = $this->contributionExpirationCutoffMs();
         $expiredContributions = DB::table('contributions')
             ->whereIn('status', ['PENDING_ADMIN'])
-            ->where('created_at_ms', '<', $twentyFourHoursAgo)
+            ->where('created_at_ms', '<', $expirationCutoff)
             ->where(function ($query) {
                 $query->whereNull('sender_receipt_hash')
                     ->orWhereNull('receiver_receipt_hash')
@@ -1206,8 +1230,7 @@ class NexoraController extends Controller
         if (in_array($contribution->status, ['CONFIRMED', 'RETURNED', 'CANCELLED', 'EXPIRED'], true)) {
             return false;
         }
-        $twentyFourHoursAgo = $this->nowMs() - (24 * 60 * 60 * 1000);
-        if ($contribution->created_at_ms < $twentyFourHoursAgo) {
+        if ($contribution->created_at_ms < $this->contributionExpirationCutoffMs()) {
             $hasSender = ! empty($contribution->sender_receipt_hash) || (bool) ($contribution->has_sender_receipt ?? false);
             $hasReceiver = ! empty($contribution->receiver_receipt_hash) || (bool) ($contribution->has_receiver_receipt ?? false);
             if (! $hasSender || ! $hasReceiver || empty($contribution->transaction_id)) {
@@ -1245,13 +1268,14 @@ class NexoraController extends Controller
 
     private function sendContributionExpirationEmail(string $to, string $name, string $contributionId, string $requestCode): void
     {
+        $minutes = (int) config('nexora.contribution_expiration_minutes');
         if (! $this->mailConfigured()) {
             Log::info("NEXORA DEV EMAIL: expiration notification for {$to} - contribution {$contributionId}");
 
             return;
         }
         try {
-            Mail::raw("Olá, {$name}.\n\nSua transação {$contributionId} na solicitação {$requestCode} expirou porque os comprovantes não foram enviados dentro de 24 horas.\n\nVocê pode tentar novamente quando uma nova solicitação estiver ativa.\n\nEquipe Nexora", function ($message) use ($to) {
+            Mail::raw("Olá, {$name}.\n\nSua transação {$contributionId} na solicitação {$requestCode} expirou porque os comprovantes não foram enviados dentro de {$minutes} minutos.\n\nVocê pode tentar novamente quando uma nova solicitação estiver ativa.\n\nEquipe Nexora", function ($message) use ($to) {
                 $message->to($to)->subject('Transação expirada - Nexora');
             });
         } catch (\Throwable $error) {
@@ -1573,10 +1597,10 @@ class NexoraController extends Controller
             'contributionId' => $contribution->id,
             'requestPublicCode' => $support->public_code,
             'receiverIdentifier' => $support->public_code,
-            'receiverPixKey' => $receiverPixKey,
-            'pixCopyCode' => '',
+            'receiverPixKey' => '',
+            'pixCopyCode' => $pixCode,
             'amountCents' => (int) $contribution->amount_cents,
-            'message' => 'Use a chave Pix do recebedor para fazer a transferência. Depois da transferência, quem enviou e quem recebeu devem anexar o ID da transação e a foto do comprovante para revisão.',
+            'message' => 'Use o código Pix copia-e-cola para fazer a transferência. Depois, quem enviou e quem recebeu devem anexar a foto do comprovante para revisão.',
         ];
     }
 
@@ -2044,6 +2068,11 @@ class NexoraController extends Controller
     private function nowMs(): int
     {
         return (int) floor(microtime(true) * 1000);
+    }
+
+    private function contributionExpirationCutoffMs(): int
+    {
+        return $this->nowMs() - ((int) config('nexora.contribution_expiration_minutes') * 60 * 1000);
     }
 
     private function contributionById(string $id): ?object

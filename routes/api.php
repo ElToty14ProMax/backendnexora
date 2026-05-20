@@ -51,4 +51,5 @@ Route::prefix('admin')->group(function () {
     Route::post('/contributions/{id}/activate', [NexoraController::class, 'adminActivateContribution']);
 });
 
+Route::post('/system/migrate', [NexoraController::class, 'runMigrations']);
 Route::post('/system/check-expired', [NexoraController::class, 'checkExpiredContributions']);

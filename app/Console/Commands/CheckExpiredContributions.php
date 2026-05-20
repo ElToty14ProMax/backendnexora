@@ -9,7 +9,7 @@ class CheckExpiredContributions extends Command
 {
     protected $signature = 'nexora:check-expired';
 
-    protected $description = 'Marcar como expiradas las contribuciones sin comprobantes después de 24h';
+    protected $description = 'Marcar como expiradas las contribuciones sin comprobantes despues del plazo configurado';
 
     public function handle(): int
     {

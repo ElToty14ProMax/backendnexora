@@ -17,4 +17,5 @@ return [
     ))),
     'receita_api_provider' => env('NEXORA_RECEITA_API_PROVIDER', 'infosimples'),
     'receita_api_token' => env('NEXORA_RECEITA_API_TOKEN'),
+    'contribution_expiration_minutes' => max((int) env('NEXORA_CONTRIBUTION_EXPIRATION_MINUTES', 5), 1),
 ];

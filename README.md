@@ -20,6 +20,7 @@ NEXORA_ADMIN_TOKEN=replace-with-32-plus-random-chars
 NEXORA_DATA_KEY_B64=base64-encoded-32-byte-key
 NEXORA_CPF_PEPPER=replace-with-long-random-pepper
 NEXORA_ADMIN_PIX_KEY=your-admin-fee-pix-key
+NEXORA_CONTRIBUTION_EXPIRATION_MINUTES=5
 NEXORA_SUPER_ADMIN_EMAIL=admin@example.com
 NEXORA_SUPER_ADMIN_CPF=valid-founder-cpf
 NEXORA_SUPER_ADMIN_PASSWORD=local-bootstrap-password
@@ -99,6 +100,11 @@ NEXORA_SUPER_ADMIN_EMAIL=admin@example.com
 NEXORA_SUPER_ADMIN_CPF=valid-founder-cpf
 NEXORA_SUPER_ADMIN_PASSWORD=bootstrap-password
 NEXORA_FOUNDER_EMAILS=admin@example.com
+
+OCR_PROVIDER=ocrspace
+OCR_SPACE_API_KEY=your-ocr-space-api-key
+OCR_SPACE_LANGUAGE=por
+OCR_SPACE_ENGINE=2
 ```
 
 If the Vercel Neon integration creates `DATABASE_URL`, `POSTGRES_URL`, `PGHOST`, `PGUSER`, and `PGPASSWORD`, Laravel will use those automatically. You only need to add `DB_CONNECTION=pgsql` and the Nexora application secrets. For Neon pooled connections, keep `DB_DISABLE_PREPARES=true` and `DB_EMULATE_PREPARES=false` so PostgreSQL transactions work correctly through PgBouncer.
@@ -114,5 +120,17 @@ After the first successful deploy, run migrations against the production databas
 ```powershell
 php artisan migrate --force
 ```
+
+If the deploy is already live on Vercel and you only have the Vercel environment configured, call the protected migration endpoint once after deploy:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri "https://your-vercel-project.vercel.app/system/migrate" `
+  -Headers @{ "X-Admin-Token" = "your-NEXORA_ADMIN_TOKEN" }
+```
+
+This endpoint exists to repair production schema drift such as missing `contributions.verification_status` after an automatic GitHub deploy. Keep `NEXORA_ADMIN_TOKEN` long and secret.
+
+For free OCR on Vercel, use `OCR_PROVIDER=ocrspace` and create a free API key at OCR.space. Add the key in Vercel Project Settings -> Environment Variables as `OCR_SPACE_API_KEY`. `tesseract` is still useful locally, but Vercel serverless functions do not normally include the native Tesseract binary.
 
 The default `AWS_*` variables are Laravel placeholders for S3/cloud storage. Nexora is not using them right now while receipts are stored in PostgreSQL, so they can stay empty unless the app is later changed to store receipt images in S3/R2.

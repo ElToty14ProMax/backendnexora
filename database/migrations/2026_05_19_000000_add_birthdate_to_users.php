@@ -9,12 +9,18 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('users', function (Blueprint $table) {
-            $table->date('birthdate')->nullable()->after('cpf_cipher');
+            if (! Schema::hasColumn('users', 'birthdate')) {
+                $table->date('birthdate')->nullable()->after('cpf_cipher');
+            }
         });
     }
 
     public function down(): void
     {
+        if (! Schema::hasColumn('users', 'birthdate')) {
+            return;
+        }
+
         Schema::table('users', function (Blueprint $table) {
             $table->dropColumn('birthdate');
         });
