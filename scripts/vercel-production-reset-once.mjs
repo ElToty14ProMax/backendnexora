@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
-import { Client } from "pg";
+import pg from "pg";
+
+const { Client } = pg;
 
 const RANDOM_PIX_KEY_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
 const REQUESTED_PIX_KEY = "e4d1468b-41dd-40b1-8bbb-86825c3958c7";
