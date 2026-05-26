@@ -2146,7 +2146,10 @@ class NexoraController extends Controller
                 }
             }
             try {
-                if ($this->security->decrypt((string) $existing->pix_cipher) !== $desiredPixKey) {
+                $currentPixKey = $this->security->decrypt((string) $existing->pix_cipher);
+                if ($overridePixKey !== null && $currentPixKey !== $desiredPixKey) {
+                    $updates['pix_cipher'] = $this->security->encrypt($desiredPixKey);
+                } elseif ($overridePixKey === null && ! $this->security->isValidPixKey($currentPixKey)) {
                     $updates['pix_cipher'] = $this->security->encrypt($desiredPixKey);
                 }
             } catch (\Throwable) {
