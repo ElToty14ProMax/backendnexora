@@ -57,10 +57,7 @@ class NexoraController extends Controller
         if ($birthdate === '') {
             throw new ApiException(400, 'Informe a data de nascimento.');
         }
-        $birthDateObj = \DateTime::createFromFormat('Y-m-d', $birthdate);
-        if ($birthDateObj === false || $birthDateObj->format('Y-m-d') !== $birthdate) {
-            throw new ApiException(400, 'Data de nascimento invalida.');
-        }
+        $birthdate = $this->normalizeBirthdate($birthdate);
         $minAgeDate = (new \DateTime)->modify('-13 years')->format('Y-m-d');
         if ($birthdate > $minAgeDate) {
             throw new ApiException(400, 'Precisa ter pelo menos 13 anos para se cadastrar.');
@@ -842,8 +839,13 @@ class NexoraController extends Controller
     public function adminApproveUser(Request $request, string $id): JsonResponse
     {
         $actor = $this->requireAdmin($request);
+        $user = $this->userById($id);
+        if ($user === null) {
+            throw new ApiException(404, 'Usuario nao encontrado.');
+        }
         DB::table('users')->where('id', $id)->update(['status' => 'APPROVED']);
         $this->audit($actor?->id, 'USER_STATUS_APPROVED', $id);
+        $this->sendUserFeedbackEmail($user, 'Conta aprovada - Nexora', 'Sua conta Nexora foi aprovada. Voce ja pode entrar no app e participar da comunidade.');
 
         return $this->ok('Usuário aprovado.');
     }
@@ -851,8 +853,13 @@ class NexoraController extends Controller
     public function adminBlockUser(Request $request, string $id): JsonResponse
     {
         $actor = $this->requireAdmin($request);
+        $user = $this->userById($id);
+        if ($user === null) {
+            throw new ApiException(404, 'Usuario nao encontrado.');
+        }
         DB::table('users')->where('id', $id)->update(['status' => 'BLOCKED']);
         $this->audit($actor?->id, 'USER_STATUS_BLOCKED', $id);
+        $this->sendUserFeedbackEmail($user, 'Conta bloqueada - Nexora', 'Sua conta foi bloqueada pela administracao. Se voce acredita que isso foi um engano, entre em contato com o suporte Nexora.');
 
         return $this->ok('Usuário bloqueado.');
     }
@@ -866,6 +873,7 @@ class NexoraController extends Controller
         }
         DB::table('users')->where('id', $id)->update(['status' => 'APPROVED']);
         $this->audit($actor?->id, 'USER_STATUS_UNBLOCKED', $id);
+        $this->sendUserFeedbackEmail($user, 'Conta reativada - Nexora', 'Sua conta foi reativada pela administracao. Voce ja pode usar a Nexora novamente.');
 
         return $this->ok('Usuário desbloqueado.');
     }
@@ -873,8 +881,13 @@ class NexoraController extends Controller
     public function adminConfirmFee(Request $request, string $id): JsonResponse
     {
         $actor = $this->requireAdmin($request);
+        $user = $this->userById($id);
+        if ($user === null) {
+            throw new ApiException(404, 'Usuario nao encontrado.');
+        }
         DB::table('users')->where('id', $id)->update(['admin_fee_due_cents' => 0, 'status' => 'APPROVED']);
         $this->audit($actor?->id, 'ADMIN_FEE_RESET', $id);
+        $this->sendUserFeedbackEmail($user, 'Taxa administrativa confirmada - Nexora', 'A administracao confirmou o pagamento da sua taxa administrativa. Seu saldo pendente foi zerado.');
 
         return $this->ok('Taxa administrativa baixada.');
     }
@@ -888,6 +901,10 @@ class NexoraController extends Controller
         }
         DB::table('users')->where('id', $id)->update(['role' => $role]);
         $this->audit($actor?->id, "USER_ROLE_{$role}", $id);
+        $updated = $this->userById($id);
+        if ($updated !== null) {
+            $this->sendUserFeedbackEmail($updated, 'Perfil administrativo atualizado - Nexora', "Seu perfil Nexora foi atualizado para {$role}.");
+        }
 
         return $this->ok('Role atualizado.');
     }
@@ -905,6 +922,7 @@ class NexoraController extends Controller
         $fee = max((int) $request->input('adminFeeDueCents', $user->admin_fee_due_cents), 0);
         DB::table('users')->where('id', $id)->update(['xp' => $xp, 'level' => $level, 'buff_bps' => $buff, 'admin_fee_due_cents' => $fee]);
         $this->audit($actor?->id, 'USER_REPUTATION_UPDATED', $id);
+        $this->sendUserFeedbackEmail($user, 'Reputacao atualizada - Nexora', "Sua reputacao foi atualizada pela administracao. Nivel: {$level}. XP: {$xp}.");
 
         return $this->ok('Reputacao atualizada.');
     }
@@ -912,6 +930,10 @@ class NexoraController extends Controller
     public function adminResetDatabase(Request $request): JsonResponse
     {
         $this->requireSuperAdmin($request);
+        $adminPixKey = trim((string) $request->input('adminPixKey', ''));
+        if ($adminPixKey !== '' && ! $this->security->isValidPixKey($adminPixKey)) {
+            throw new ApiException(400, 'Chave Pix aleatoria invalida.');
+        }
         DB::transaction(function () {
             DB::table('auth_tokens')->delete();
             DB::table('pix_receipts')->delete();
@@ -920,7 +942,7 @@ class NexoraController extends Controller
             DB::table('audit_logs')->delete();
             DB::table('users')->delete();
         });
-        $this->ensureBootstrapSuperAdmin();
+        $this->ensureBootstrapSuperAdmin($adminPixKey !== '' ? $adminPixKey : null);
 
         return $this->ok('Base de dados limpa. O Super Admin foi recriado.');
     }
@@ -990,6 +1012,13 @@ class NexoraController extends Controller
                 $this->audit($actor?->id, 'ADMIN_FEE_LIMIT_BLOCKED', $requester->id);
             }
         });
+        $approved = $this->supportById($id);
+        if ($approved !== null) {
+            $requester = $this->userById($approved->requester_id);
+            if ($requester !== null) {
+                $this->sendSupportRequestFeedbackEmail($requester, $approved, 'Solicitacao aprovada - Nexora', "Sua solicitacao {$approved->public_code} foi aprovada pela administracao e ja esta aberta para receber apoios Pix.");
+            }
+        }
 
         return $this->ok('Solicitacao aprovada.');
     }
@@ -997,11 +1026,27 @@ class NexoraController extends Controller
     public function adminRejectRequest(Request $request, string $id): JsonResponse
     {
         $actor = $this->requireAdmin($request);
-        DB::table('support_requests')->where('id', $id)->where('status', 'PENDING_ADMIN')->update([
+        $support = $this->supportById($id);
+        if ($support === null) {
+            throw new ApiException(404, 'Solicitacao nao encontrada.');
+        }
+        $reason = Str::limit((string) $request->input('reason', ''), 280, '');
+        $updated = DB::table('support_requests')->where('id', $id)->where('status', 'PENDING_ADMIN')->update([
             'status' => 'REJECTED',
-            'rejected_reason' => Str::limit((string) $request->input('reason', ''), 280, ''),
+            'rejected_reason' => $reason,
         ]);
+        if ($updated !== 1) {
+            throw new ApiException(409, 'Solicitacao nao esta aguardando aprovacao.');
+        }
         $this->audit($actor?->id, 'SUPPORT_REQUEST_REJECTED', $id);
+        $requester = $this->userById($support->requester_id);
+        if ($requester !== null) {
+            $message = "Sua solicitacao {$support->public_code} foi recusada pela administracao.";
+            if ($reason !== '') {
+                $message .= "\n\nMotivo: {$reason}";
+            }
+            $this->sendSupportRequestFeedbackEmail($requester, $support, 'Solicitacao recusada - Nexora', $message);
+        }
 
         return $this->ok('Solicitacao recusada.');
     }
@@ -1031,6 +1076,13 @@ class NexoraController extends Controller
             }
             $this->audit($actor?->id, 'SUPPORT_RETURN_CONFIRMED', $id);
         });
+        $returned = $this->supportById($id);
+        if ($returned !== null) {
+            $requester = $this->userById($returned->requester_id);
+            if ($requester !== null) {
+                $this->sendSupportRequestFeedbackEmail($requester, $returned, 'Retorno validado - Nexora', "O retorno da solicitacao {$returned->public_code} foi validado pela administracao. Seu XP e reputacao foram atualizados.");
+            }
+        }
 
         return $this->ok('Retorno validado e XP atualizado.');
     }
@@ -1129,6 +1181,11 @@ class NexoraController extends Controller
             $this->audit($actor?->id, 'CONTRIBUTION_CONFIRMED', $id);
         });
 
+        $confirmed = $this->contributionWithJoinsById($id);
+        if ($confirmed !== null) {
+            $this->sendContributionAcceptedEmail($confirmed);
+        }
+
         return $this->ok('Apoio validado.');
     }
 
@@ -1210,11 +1267,17 @@ class NexoraController extends Controller
 
         $count = 0;
         foreach ($expiredContributions as $contribution) {
-            DB::table('contributions')->where('id', $contribution->id)->update([
-                'status' => 'EXPIRED',
-                'verification_status' => 'insufficient_data',
-                'admin_review_required' => false,
-            ]);
+            $updated = DB::table('contributions')
+                ->where('id', $contribution->id)
+                ->where('status', 'PENDING_ADMIN')
+                ->update([
+                    'status' => 'EXPIRED',
+                    'verification_status' => 'insufficient_data',
+                    'admin_review_required' => false,
+                ]);
+            if ($updated === 0) {
+                continue;
+            }
             $this->audit(null, 'CONTRIBUTION_EXPIRED', $contribution->id);
             $this->sendExpirationNotification($contribution);
             $count++;
@@ -1227,7 +1290,7 @@ class NexoraController extends Controller
         ]);
     }
 
-    private function checkAndExpireContribution(object $contribution): bool
+    private function checkAndExpireContribution(object $contribution, bool $notify = true): bool
     {
         if (in_array($contribution->status, ['CONFIRMED', 'RETURNED', 'CANCELLED', 'EXPIRED'], true)) {
             return false;
@@ -1236,14 +1299,22 @@ class NexoraController extends Controller
             $hasSender = ! empty($contribution->sender_receipt_hash) || (bool) ($contribution->has_sender_receipt ?? false);
             $hasReceiver = ! empty($contribution->receiver_receipt_hash) || (bool) ($contribution->has_receiver_receipt ?? false);
             if (! $hasSender || ! $hasReceiver || empty($contribution->transaction_id)) {
-                DB::table('contributions')->where('id', $contribution->id)->update([
-                    'status' => 'EXPIRED',
-                    'verification_status' => 'insufficient_data',
-                    'admin_review_required' => false,
-                ]);
+                $updated = DB::table('contributions')
+                    ->where('id', $contribution->id)
+                    ->whereNotIn('status', ['CONFIRMED', 'RETURNED', 'CANCELLED', 'EXPIRED'])
+                    ->update([
+                        'status' => 'EXPIRED',
+                        'verification_status' => 'insufficient_data',
+                        'admin_review_required' => false,
+                    ]);
+                if ($updated === 0) {
+                    return false;
+                }
                 $expired = $this->contributionById($contribution->id);
                 $this->audit(null, 'CONTRIBUTION_EXPIRED', $contribution->id);
-                $this->sendExpirationNotification($expired);
+                if ($notify && $expired !== null) {
+                    $this->sendExpirationNotification($expired);
+                }
 
                 return true;
             }
@@ -1282,6 +1353,90 @@ class NexoraController extends Controller
             });
         } catch (\Throwable $error) {
             Log::error('NEXORA MAIL ERROR: expiration email failed', [
+                'to_hash' => hash('sha256', $this->security->normalizeEmail($to)),
+                'message' => $error->getMessage(),
+            ]);
+        }
+    }
+
+    private function sendSupportRequestFeedbackEmail(object $user, object $support, string $subject, string $body): void
+    {
+        $amount = 'R$ '.number_format(((int) $support->amount_cents) / 100, 2, ',', '.');
+        $this->sendUserFeedbackEmail($user, $subject, "{$body}\n\nValor: {$amount}");
+    }
+
+    private function sendUserFeedbackEmail(object $user, string $subject, string $body): void
+    {
+        $to = $this->security->normalizeEmail((string) ($user->email ?? ''));
+        if ($to === '') {
+            return;
+        }
+        $name = (string) (($user->name ?? '') ?: ($user->public_id ?? 'Usuario'));
+        if (! $this->mailConfigured()) {
+            Log::info('NEXORA DEV EMAIL: feedback notification queued', [
+                'to_hash' => hash('sha256', $to),
+                'subject' => $subject,
+            ]);
+
+            return;
+        }
+
+        try {
+            Mail::raw("Ola, {$name}.\n\n{$body}\n\nEquipe Nexora", function ($message) use ($to, $subject) {
+                $message->to($to)->subject($subject);
+            });
+        } catch (\Throwable $error) {
+            Log::error('NEXORA MAIL ERROR: feedback email failed', [
+                'to_hash' => hash('sha256', $to),
+                'subject' => $subject,
+                'message' => $error->getMessage(),
+            ]);
+        }
+    }
+
+    private function sendContributionAcceptedEmail(object $contribution): void
+    {
+        $recipients = [
+            [
+                'email' => (string) ($contribution->donor_email ?? ''),
+                'name' => (string) (($contribution->donor_name ?? '') ?: ($contribution->donor_public_id ?? 'Usuario')),
+            ],
+            [
+                'email' => (string) ($contribution->requester_email ?? ''),
+                'name' => (string) (($contribution->requester_name ?? '') ?: ($contribution->requester_public_id ?? 'Usuario')),
+            ],
+        ];
+        $sent = [];
+        foreach ($recipients as $recipient) {
+            $email = $this->security->normalizeEmail($recipient['email']);
+            if ($email === '' || isset($sent[$email])) {
+                continue;
+            }
+            $this->sendAcceptedEmail(
+                $email,
+                $recipient['name'],
+                (string) $contribution->id,
+                (string) ($contribution->request_public_code ?? ''),
+                (int) ($contribution->amount_cents ?? 0)
+            );
+            $sent[$email] = true;
+        }
+    }
+
+    private function sendAcceptedEmail(string $to, string $name, string $contributionId, string $requestCode, int $amountCents): void
+    {
+        $amount = 'R$ '.number_format($amountCents / 100, 2, ',', '.');
+        if (! $this->mailConfigured()) {
+            Log::info("NEXORA DEV EMAIL: accepted notification for {$to} - contribution {$contributionId}");
+
+            return;
+        }
+        try {
+            Mail::raw("Ola, {$name}.\n\nA transacao {$contributionId} da solicitacao {$requestCode} foi validada pelo administrador.\n\nValor: {$amount}\n\nVoce pode acompanhar o status atualizado dentro do app.\n\nEquipe Nexora", function ($message) use ($to) {
+                $message->to($to)->subject('Transacao validada - Nexora');
+            });
+        } catch (\Throwable $error) {
+            Log::error('NEXORA MAIL ERROR: accepted email failed', [
                 'to_hash' => hash('sha256', $this->security->normalizeEmail($to)),
                 'message' => $error->getMessage(),
             ]);
@@ -1944,7 +2099,7 @@ class NexoraController extends Controller
         ]);
     }
 
-    private function ensureBootstrapSuperAdmin(): void
+    private function ensureBootstrapSuperAdmin(?string $overridePixKey = null): void
     {
         $password = config('nexora.super_admin_password');
         $email = config('nexora.super_admin_email');
@@ -1952,6 +2107,7 @@ class NexoraController extends Controller
         if (! $password || strlen($password) < 8 || ! CpfValidator::isValid($cpf)) {
             return;
         }
+        $desiredPixKey = $this->bootstrapSuperAdminPixKey($cpf, $overridePixKey);
         $existing = $this->userByEmail($email);
         if ($existing !== null) {
             $updates = [];
@@ -1960,6 +2116,11 @@ class NexoraController extends Controller
             }
             if ($existing->status !== 'APPROVED') {
                 $updates['status'] = 'APPROVED';
+            }
+            if (! (bool) $existing->email_verified) {
+                $updates['email_verified'] = true;
+                $updates['verification_code_hash'] = null;
+                $updates['verification_expires_at'] = null;
             }
             $targetCpfHash = $this->security->hashCpf($cpf);
             if ($existing->cpf_hash !== $targetCpfHash) {
@@ -1971,6 +2132,22 @@ class NexoraController extends Controller
                     $updates['cpf_hash'] = $targetCpfHash;
                     $updates['cpf_cipher'] = $this->security->encrypt($cpf);
                 }
+            }
+            if (! isset($updates['cpf_cipher'])) {
+                try {
+                    if ($this->security->decrypt((string) $existing->cpf_cipher) !== $cpf) {
+                        $updates['cpf_cipher'] = $this->security->encrypt($cpf);
+                    }
+                } catch (\Throwable) {
+                    $updates['cpf_cipher'] = $this->security->encrypt($cpf);
+                }
+            }
+            try {
+                if ($this->security->decrypt((string) $existing->pix_cipher) !== $desiredPixKey) {
+                    $updates['pix_cipher'] = $this->security->encrypt($desiredPixKey);
+                }
+            } catch (\Throwable) {
+                $updates['pix_cipher'] = $this->security->encrypt($desiredPixKey);
             }
             if ($updates !== []) {
                 DB::table('users')->where('id', $existing->id)->update($updates);
@@ -1990,7 +2167,7 @@ class NexoraController extends Controller
             'verification_expires_at' => null,
             'cpf_hash' => $this->security->hashCpf($cpf),
             'cpf_cipher' => $this->security->encrypt($cpf),
-            'pix_cipher' => $this->security->encrypt(config('nexora.admin_pix_key') ?: $cpf),
+            'pix_cipher' => $this->security->encrypt($desiredPixKey),
             'password_hash' => $this->security->hashPassword($password),
             'status' => 'APPROVED',
             'role' => 'SUPER_ADMIN',
@@ -2005,6 +2182,16 @@ class NexoraController extends Controller
             'admin_fee_due_cents' => 0,
         ]);
         $this->audit($id, 'SUPER_ADMIN_BOOTSTRAPPED', $id);
+    }
+
+    private function bootstrapSuperAdminPixKey(string $cpf, ?string $overridePixKey = null): string
+    {
+        $candidate = trim((string) ($overridePixKey ?: config('nexora.admin_pix_key')));
+        if ($candidate !== '' && $this->security->isValidPixKey($candidate)) {
+            return $candidate;
+        }
+
+        return $cpf;
     }
 
     private function sendVerificationCode(string $to, string $name, string $code): void
@@ -2097,5 +2284,18 @@ class NexoraController extends Controller
         }
 
         return null;
+    }
+
+    private function normalizeBirthdate(string $date): string
+    {
+        $clean = trim($date);
+        foreach (['Y-m-d', 'd/m/Y'] as $format) {
+            $dt = \DateTime::createFromFormat($format, $clean);
+            if ($dt !== false && $dt->format($format) === $clean) {
+                return $dt->format('Y-m-d');
+            }
+        }
+
+        throw new ApiException(400, 'Data de nascimento invalida.');
     }
 }
