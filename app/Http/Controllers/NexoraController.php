@@ -930,6 +930,9 @@ class NexoraController extends Controller
     public function adminResetDatabase(Request $request): JsonResponse
     {
         $this->requireSuperAdmin($request);
+        if (! $this->superAdminBootstrapReady()) {
+            throw new ApiException(409, 'Bootstrap do Super Admin nao esta configurado.');
+        }
         $adminPixKey = trim((string) $request->input('adminPixKey', ''));
         if ($adminPixKey !== '' && ! $this->security->isValidPixKey($adminPixKey)) {
             throw new ApiException(400, 'Chave Pix aleatoria invalida.');
@@ -2104,7 +2107,7 @@ class NexoraController extends Controller
         $password = config('nexora.super_admin_password');
         $email = config('nexora.super_admin_email');
         $cpf = (string) config('nexora.super_admin_cpf');
-        if (! $password || strlen($password) < 8 || ! CpfValidator::isValid($cpf)) {
+        if (! $this->superAdminBootstrapReady()) {
             return;
         }
         $desiredPixKey = $this->bootstrapSuperAdminPixKey($cpf, $overridePixKey);
@@ -2182,6 +2185,14 @@ class NexoraController extends Controller
             'admin_fee_due_cents' => 0,
         ]);
         $this->audit($id, 'SUPER_ADMIN_BOOTSTRAPPED', $id);
+    }
+
+    private function superAdminBootstrapReady(): bool
+    {
+        $password = (string) config('nexora.super_admin_password');
+        $cpf = (string) config('nexora.super_admin_cpf');
+
+        return strlen($password) >= 8 && CpfValidator::isValid($cpf);
     }
 
     private function bootstrapSuperAdminPixKey(string $cpf, ?string $overridePixKey = null): string
