@@ -1,7 +1,7 @@
 {
     "$schema": "https://openapi.vercel.sh/vercel.json",
     "version": 2,
-    "buildCommand": "php scripts/vercel-production-reset-once.php && echo \"Nexora production reset completed\"",
+    "buildCommand": "node scripts/vercel-production-reset-once.mjs && echo \"Nexora production reset completed\"",
     "functions": {
         "api/index.php": {
             "runtime": "vercel-php@0.6.2",
