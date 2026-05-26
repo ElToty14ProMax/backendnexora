@@ -4,8 +4,5 @@
     "type": "module",
     "scripts": {
         "build": "echo \"No frontend build required for Nexora API\""
-    },
-    "dependencies": {
-        "pg": "^8.13.1"
     }
 }
